@@ -1,0 +1,2000 @@
+---
+title: "RNAseq Analysis 3.0"
+author: "Andrew D. Johnston"
+date: "7/01/2018"
+output:
+  html_document:
+  css: styles.css
+toc: yes
+toc_depth: 4
+pdf_document:
+  toc: yes
+word_document: default
+editor_options: 
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+```{r packages,echo=TRUE, warning=FALSE, message = FALSE}
+# 
+setwd("/Volumes/home-1/anjohnst/17_member/RNA-seq/Quant_2018")
+setwd("/Volumes/"
+# load in libraries 
+library(DESeq2)
+library(EDASeq)
+library(matrixStats)
+library(RUVSeq)
+library(qvalue)
+library(genefilter)
+library(RColorBrewer)
+library(pheatmap)
+library(UpSetR)
+library(RFmarkerDetector)
+library(sleuth)
+library(rhdf5)
+library(data.table)
+library(gplots)
+library(gridExtra)
+library(Rmisc)
+library(rafalib)
+library(GeneOverlap)
+library(multiMiR)
+library(XML)
+library(RCurl)
+
+# set options
+options(scipen=999, stringsAsFactors = FALSE)
+```
+
+Reading in the Kallisto Quantifications and extracting the estimated counts and combining them by gene.
+
+```{r prep-sleuth-protlinc, echo=TRUE, warning=FALSE, message = FALSE}
+ # create metadata table with Kallisto paths for sleuth
+dirs_protlinc <- grep("_kallisto_protlinc", x = list.dirs(path = "."), value = T)
+dirs_protlinc
+sample_id <- substr(dirs_protlinc,start = 3, 6)
+
+names(dirs_protlinc) <- sample_id
+metadata<-read.table("../Kallisto/metadata.txt", header = TRUE)
+head(metadata)
+s2c_protlinc <- cbind(metadata, dirs_protlinc)
+colnames(s2c_protlinc)[10] <- "path"
+s2c_protlinc <- s2c_protlinc[,-c(2,9)]
+
+ # read in transcript-gene table
+t2g_mine <- read.table("../Kallisto/kallisto_t2g.txt", stringsAsFactors = F)
+str(t2g_mine)
+colnames(t2g_mine) <- c("target_id", "ens_gene", "Gene_sym")
+
+so_protlinc <- sleuth_prep(s2c_protlinc, target_mapping = t2g_mine,
+  aggregation_column = 'ens_gene', extra_bootstrap_summary = TRUE)
+
+nrow(so_protlinc$filter_df) # 66777
+pdf(file = "PCA_sleuth_protlinc.pdf", width = 6, height = 4.5, family="ArialMT")
+plot_pca(so_protlinc, text_labels = T, use_filtered = TRUE, color_by = 'sex')
+plot_pca(so_protlinc, text_labels = T, use_filtered = TRUE, color_by = 'extract')
+plot_pca(so_protlinc, text_labels = T, use_filtered = TRUE, color_by = 'mito')
+plot_pca(so_protlinc, text_labels = T, use_filtered = TRUE, color_by = 'harvest')
+plot_pca(so_protlinc, text_labels = T, use_filtered = TRUE, color_by = 'C7YD7ACXX')
+plot_pca(so_protlinc, text_labels = T, use_filtered = TRUE, color_by = 'HKW53BCXX')
+plot_pc_variance(so_protlinc)
+dev.off()
+plot_scatter(so_protlinc)
+
+# plot_sample_heatmap(so_prot)
+saveRDS(so_protlinc, "sleuth_protlinc.rds")
+
+genes_norm_filt_protlinc <- sleuth:::spread_abundance_by(abund = so_protlinc$obs_norm_filt,
+                                                   var = "est_counts", 
+                                                   which_order = so_protlinc$sample_to_covariates$sample)
+
+genes_norm_filt_merge_protlinc <- merge(x = genes_norm_filt_protlinc, y = t2g_mine, by.x ="row.names", by.y="target_id")
+
+genes_norm_protlinc <- sleuth:::spread_abundance_by(abund = so_protlinc$obs_norm,
+                                                   var = "est_counts", 
+                                                   which_order = so_protlinc$sample_to_covariates$sample)
+
+genes_norm_merge_protlinc <- merge(x = genes_norm_protlinc, y = t2g_mine, by.x ="row.names", by.y="target_id")
+head(genes_norm_merge_protlinc)
+dim(genes_norm_merge_protlinc)
+tail(genes_norm_merge_protlinc)
+genes_norm_merge_dataTable_protlinc <- data.table(genes_norm_merge_protlinc, key='ens_gene')
+
+genes_norm_sum_protlinc <- genes_norm_merge_dataTable_protlinc[,list(GM77=sum(GM77),
+                                                                 GM78=sum(GM78), 
+                                                       GM79=sum(GM79), GM80=sum(GM80),
+                                                       GM81=sum(GM81), GM82=sum(GM82),
+                                                       GM83=sum(GM83), GM84=sum(GM84), 
+                                                       GM85=sum(GM85), GM86=sum(GM86),
+                                                       GM87=sum(GM87), GM88=sum(GM88),
+                                                       GM89=sum(GM89), GM90=sum(GM90),
+                                                       GM91=sum(GM91), GM92=sum(GM92),
+                                                       GM93=sum(GM93)), by='ens_gene']
+
+dim(genes_norm_sum_protlinc)
+class(genes_norm_sum_protlinc)
+genes_norm_sum_protlinc <- as.data.frame(genes_norm_sum_protlinc)
+idx_fil_gene_protlinc <- which(genes_norm_sum_protlinc$ens_gene %in% genes_norm_filt_merge_protlinc$ens_gene)
+length(idx_fil_gene_protlinc) # 17437
+genes_norm_sum_protlinc_filt <- genes_norm_sum_protlinc[idx_fil_gene_protlinc,]
+dim(genes_norm_sum_protlinc_filt) # 17437    18
+
+saveRDS(genes_norm_sum_protlinc_filt,"genes_norm_sum_protlinc_filt.rds")
+
+# filter out sex chromosomes (no EBV to filter)
+## Filtering out sex chromosomes
+sex_chr <- read.table("../Kallisto/sex_chr_genenames.txt")
+head(sex_chr)
+length(table(sex_chr$V2)) # 3078 genes
+
+length(which(genes_norm_sum_protlinc_filt$ens_gene %in% sex_chr$V2)) #582 to be filtered out
+genes_norm_filt_noSex_protlinc <- genes_norm_sum_protlinc_filt[-which(genes_norm_sum_protlinc_filt$ens_gene %in% sex_chr$V2),]
+dim(genes_norm_filt_noSex_protlinc) # 16855    18
+
+ # one more filter based on counts for the children at least 5 children must have 5 or more counts
+dim(genes_norm_filt_noSex_protlinc) # 16855
+genes_norm_filt_noSex_protlinc <- as.data.frame(genes_norm_filt_noSex_protlinc)
+genes_norm_filt_noSex_protlinc[grep("ENSG00000134184", genes_norm_filt_noSex_protlinc$ens_gene),]
+hist(log2(rowMeans(genes_norm_filt_noSex_protlinc[,-c(1,2,3,14:17)])), breaks=50)
+idx_childfilt2 <- which(log(rowMeans(genes_norm_filt_noSex_protlinc[,-c(1,2,3,14:17)]))>=2.3)
+length(idx_childfilt2) #15927
+sum(idx_childfilt2 %in% idx_childfilt)
+any(idx_childfilt2 == 5339)
+
+sum(rowSums(genes_norm_filt_noSex_protlinc[,-c(1,2,3,14:17)]>=5)>=9) # 14806
+idx_childfilt <- which(rowSums(genes_norm_filt_noSex_protlinc[,-c(1,2,3,14:17)]>=5)>=9)
+genes_norm_filt_noSex_protlinc_childfilt <- genes_norm_filt_noSex_protlinc[idx_childfilt,]
+dim(genes_norm_filt_noSex_protlinc_childfilt) # 14806
+saveRDS(genes_norm_filt_noSex_protlinc_childfilt, "genes_norm_filt_noSex_protlinc_childfilt.rds")
+
+genes_norm_filt_noSex_protlinc_childfilt2 <- genes_norm_filt_noSex_protlinc[idx_childfilt2,]
+dim(genes_norm_filt_noSex_protlinc_childfilt2) # 14806
+saveRDS(genes_norm_filt_noSex_protlinc_childfilt2, "genes_norm_filt_noSex_protlinc_childfilt2.rds")
+
+head(genes_norm_filt_noSex_protlinc_childfilt2)
+
+write.table(genes_norm_filt_noSex_protlinc_childfilt2, "TPM_filtered_gene_counts_table.txt", append=F,
+            col.names=TRUE, row.names=F, sep="\t", quote=F)
+```
+
+
+```{r prep-sleuth-protlincEBV, echo=TRUE, warning=FALSE, message = FALSE}
+ # create metadata table with Kallisto paths for sleuth
+dirs_protlincEBV <- grep("_kallisto_protlincEBV", x = list.dirs(path = "."), value = T)
+names(dirs_protlincEBV) <- sample_id
+s2c_protlincEBV <- s2c_protlinc
+s2c_protlincEBV$path <- dirs_protlincEBV
+
+so_protlincEBV <- sleuth_prep(s2c_protlincEBV, target_mapping = t2g_mine,
+  aggregation_column = 'ens_gene', extra_bootstrap_summary = TRUE)
+
+nrow(so_protlincEBV$filter_df) # 66867
+plot_pca(so_protlincEBV, text_labels = T, use_filtered = TRUE, color_by = 'sex')
+plot_pca(so_protlincEBV, text_labels = T, use_filtered = TRUE, color_by = 'extract')
+plot_pca(so_protlincEBV, text_labels = T, use_filtered = TRUE, color_by = 'mito')
+plot_pca(so_protlincEBV, text_labels = T, use_filtered = TRUE, color_by = 'harvest')
+plot_pca(so_protlincEBV, text_labels = T, use_filtered = TRUE, color_by = 'C7YD7ACXX')
+plot_pca(so_protlincEBV, text_labels = T, use_filtered = TRUE, color_by = 'HKW53BCXX')
+plot_pc_variance(so_protlincEBV)
+
+# plot_sample_heatmap(so_prot)
+saveRDS(so_protlincEBV, "sleuth_protlincEBV.rds")
+
+genes_norm_filt_protlincEBV <- sleuth:::spread_abundance_by(abund = so_protlincEBV$obs_norm_filt,
+                                                   var = "est_counts", 
+                                                   which_order = so_protlincEBV$sample_to_covariates$sample)
+
+genes_norm_filt_merge_protlincEBV <- merge(x = genes_norm_filt_protlincEBV, y = t2g_mine, by.x ="row.names", by.y="target_id")
+
+genes_norm_protlincEBV <- sleuth:::spread_abundance_by(abund = so_protlincEBV$obs_norm,
+                                                   var = "est_counts", 
+                                                   which_order = so_protlincEBV$sample_to_covariates$sample)
+
+genes_norm_merge_protlincEBV <- merge(x = genes_norm_protlincEBV, y = t2g_mine, by.x ="row.names", by.y="target_id")
+head(genes_norm_merge_protlincEBV)
+dim(genes_norm_merge_protlincEBV) # 157554  20
+tail(genes_norm_merge_protlincEBV)
+genes_norm_merge_dataTable_protlincEBV <- data.table(genes_norm_merge_protlincEBV, key='ens_gene')
+
+genes_norm_sum_protlincEBV <- genes_norm_merge_dataTable_protlincEBV[,list(GM77=sum(GM77),
+                                                                 GM78=sum(GM78), 
+                                                       GM79=sum(GM79), GM80=sum(GM80),
+                                                       GM81=sum(GM81), GM82=sum(GM82),
+                                                       GM83=sum(GM83), GM84=sum(GM84), 
+                                                       GM85=sum(GM85), GM86=sum(GM86),
+                                                       GM87=sum(GM87), GM88=sum(GM88),
+                                                       GM89=sum(GM89), GM90=sum(GM90),
+                                                       GM91=sum(GM91), GM92=sum(GM92),
+                                                       GM93=sum(GM93)), by='ens_gene']
+
+dim(genes_norm_sum_protlincEBV) # 27816
+class(genes_norm_sum_protlincEBV)
+genes_norm_sum_protlincEBV <- as.data.frame(genes_norm_sum_protlincEBV)
+idx_fil_gene_protlincEBV <- which(genes_norm_sum_protlincEBV$ens_gene %in% genes_norm_filt_merge_protlincEBV$ens_gene)
+length(idx_fil_gene_protlincEBV) # 17521
+genes_norm_sum_protlincEBV_filt <- genes_norm_sum_protlincEBV[idx_fil_gene_protlincEBV,]
+dim(genes_norm_sum_protlincEBV_filt) # 17437    18
+
+saveRDS(genes_norm_sum_protlincEBV_filt,"genes_norm_sum_protlincEBV_filt.rds")
+
+# filter out sex chromosomes (no EBV to filter)
+## Filtering out sex chromosomes
+length(which(genes_norm_sum_protlincEBV_filt$ens_gene %in% sex_chr$V2)) #582 to be filtered out
+genes_norm_filt_noSex_protlincEBV <- genes_norm_sum_protlincEBV_filt[-which(genes_norm_sum_protlincEBV_filt$ens_gene %in% sex_chr$V2),]
+dim(genes_norm_filt_noSex_protlincEBV) # 16940    18
+genes_norm_filt_noSex_protlincEBV_noEBV <- genes_norm_filt_noSex_protlincEBV[grep("ENSG", genes_norm_filt_noSex_protlincEBV$ens_gene, invert=FALSE),]
+dim(genes_norm_filt_noSex_protlincEBV_noEBV)
+head(genes_norm_filt_noSex_protlincEBV_noEBV)
+
+# Grab EBV genes
+EBV_genes_norm_filt_noSex_protlincEBV <- genes_norm_filt_noSex_protlincEBV[grep("ENSG", genes_norm_filt_noSex_protlincEBV$ens_gene, invert=TRUE),]
+dim(EBV_genes_norm_filt_noSex_protlincEBV) # 91 18
+
+
+# Look at the relative levels of EBV 
+summary(rowMeans(EBV_genes_norm_filt_noSex_protlincEBV[,-1]))
+rownames(EBV_genes_norm_filt_noSex_protlincEBV) <- EBV_genes_norm_filt_noSex_protlincEBV[,1]
+EBV_genes_norm_filt_noSex_protlincEBV <-EBV_genes_norm_filt_noSex_protlincEBV[,-1]
+order_rsd <- order(apply(as.matrix(EBV_genes_norm_filt_noSex_protlincEBV), 1, rsd), decreasing=TRUE)
+head(row.names(EBV_genes_norm_filt_noSex_protlincEBV)[order_rsd],20) # the highest rsd's
+boxplot(log(rowSds(EBV_genes_norm_filt_noSex_protlincEBV))) # BHLF1 is leaps and bounds above more variable.
+
+# make the dendrogram
+d_ebv <- dist( t(EBV_genes_norm_filt_noSex_protlincEBV) )
+hc_ebv <- hclust(d_ebv)
+plot(hc_ebv,labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV),cex=0.5)
+myplclust(hc_ebv, labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV), lab.col=as.fumeric(as.character(metadata$sex)), cex=0.5)
+
+myplclust(hc_ebv, labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV), lab.col=as.fumeric(as.character(metadata$extract)), cex=0.5)
+
+myplclust(hc_ebv, labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV), lab.col=as.fumeric(as.character(metadata$harvest)), cex=0.5)
+
+myplclust(hc_ebv, labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV), lab.col=as.fumeric(as.character(metadata$C7YD7ACXX)), cex=0.5)
+
+myplclust(hc_ebv, labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV), lab.col=as.fumeric(as.character(metadata$HKW53BCXX)), cex=0.5)
+
+myplclust(hc_ebv, labels=colnames(EBV_genes_norm_filt_noSex_protlincEBV), lab.col=as.fumeric(as.character((metadata$generation))), cex=0.5)
+
+EBV_covariate_value<- readRDS("../Sleuth/EBV_covariate_value.rds")
+cor(log(colMeans(EBV_genes_norm_filt_noSex_protlincEBV)),EBV_covariate_value)
+log(colMeans(EBV_genes_norm_filt_noSex_protlincEBV))
+
+
+set_EBV <- newSeqExpressionSet(as.matrix(EBV_genes_norm_filt_noSex_protlincEBV),
+                           phenoData = data.frame(facts, 
+                                                  row.names=colnames(EBV_genes_norm_filt_noSex_protlincEBV)))
+
+colors <- colorRampPalette(brewer.pal(11, "Spectral"))(17)
+
+# set up factors and colors
+str(metadata)
+metadata[,3] <- as.factor(metadata[,3])
+metadata[,4] <- as.factor(metadata[,4])
+metadata[,5] <- as.factor(metadata[,5])
+metadata[,6] <- as.factor(metadata[,6])
+metadata[,7] <- as.factor(metadata[,7])
+metadata[,8] <- as.factor(metadata[,8])
+metadata[,9] <- as.factor(metadata[,9])
+
+# bring in EBV covariate 
+metadata$EBV <- EBV_covariate_value
+metadata$EBV_cut <- cut(metadata$EBV, breaks=4)
+  
+facts_sex <- metadata$sex
+color_sex <- brewer.pal(3, "Set1")
+facts_EBV <- metadata$EBV_cut
+color_EBV <- brewer.pal(4, "Set1")
+facts_harvest <- metadata$harvest
+color_harvest <- brewer.pal(6, "Set1")
+facts_extract <- metadata$extract
+color_extract <- brewer.pal(3, "Set1")
+facts_gen <- metadata$generation
+facts_mito <- metadata$mito
+
+pdf(file = "RLE_EBV_genes_norm_filt_noSex_protlinc.pdf", width = 6, height = 4, family="ArialMT")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2)) 
+title("EBV Genes norm filt noSex protlinc")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2), col=color_sex[facts_sex]) 
+title("EBV Genes norm filt noSex protlinc colSex")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2), col=color_EBV[facts_EBV]) 
+title("EBV Genes norm filt noSex protlinc colEBV")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2), col=color_harvest[facts_harvest]) 
+title("EBV Genes norm filt noSex protlinc colharvest")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2), col=color_extract[facts_extract]) 
+title("EBV Genes norm filt noSex protlinc colextract")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2), col=color_extract[facts_gen]) 
+title("EBV Genes norm filt noSex protlinc colGen")
+plotRLE(set_EBV, outline=FALSE, ylim=c(-2, 2), col=color_harvest[facts_mito]) 
+title("EBV Genes norm filt noSex protlinc colMito")
+dev.off()
+
+pdf(file = "PCA_EBV_genes_norm_filt_noSex_protlinc.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_EBV, col=colors[facts], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc")
+plotPCA(set_EBV, col=color_sex[facts_sex], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc colSex")
+plotPCA(set_EBV, col=color_EBV[facts_EBV], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc colEBV")
+plotPCA(set_EBV, col=color_harvest[facts_harvest], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc colharvest")
+plotPCA(set_EBV, col=color_extract[facts_extract], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc colextract")
+plotPCA(set_EBV, col=color_extract[facts_gen], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc colGen")
+plotPCA(set_EBV, col=color_harvest[facts_mito], cex=1.2, k=2)
+title("EBV Genes norm filt noSex protlinc colMito")
+dev.off()
+
+pdf(file = "PCA_k3_EBV_genes_norm_filt_noSex_protlinc.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_EBV, col=colors[facts], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc")
+plotPCA(set_EBV, col=color_sex[facts_sex], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc colSex")
+plotPCA(set_EBV, col=color_EBV[facts_EBV], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc colEBV")
+plotPCA(set_EBV, col=color_harvest[facts_harvest], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc colharvest")
+plotPCA(set_EBV, col=color_extract[facts_extract], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc colextract")
+plotPCA(set_EBV, col=color_extract[facts_gen], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc colharvest")
+plotPCA(set_EBV, col=color_harvest[facts_mito], cex=1.2, k=3)
+title("EBV Genes norm filt noSex protlinc colMito")
+dev.off()
+
+# generate heatmap of top 40 variable 
+cols_EBV <- palette(brewer.pal(4, "RdPu"))[cut(EBV_covariate_value, breaks=4)]
+hmcol_EBV <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+pdf(file = "PCA_heatmap_EBV_topVar_genes.pdf", width = 10, height = 6, family="ArialMT")
+heatmap.2(as.matrix(EBV_genes_norm_filt_noSex_protlincEBV[order_rsd[c(1:40)],]),
+          labCol=colnames(EBV_genes_norm_filt_noSex_protlincEBV),
+          trace="none", 
+          ColSideColors=cols_EBV,
+          col=hmcol_EBV, 
+          main="Top 40 variable EBV genes cluster somewhat due to\nEBV covariate value cutoffs")
+
+heatmap.2(as.matrix(EBV_genes_norm_filt_noSex_protlincEBV[order_rsd[c(1:18,20:40)],]),
+          labCol=colnames(EBV_genes_norm_filt_noSex_protlincEBV),
+          trace="none", 
+          ColSideColors=cols_EBV,
+          col=hmcol_EBV, 
+          main="Top 40 variable EBV genes excluding BHLF1")
+dev.off()
+
+# correlation heatmap of the data
+pdf(file="Cor_plot_EBV_genes_norm_filt_noSex_protlinc.pdf", width = 7, height=5)
+generate_heatmap(EBV_genes_norm_filt_noSex_protlincEBV, "genes_norm_filt_noSex_protlinc")
+dev.off()
+
+pdf(file="Cor_plot_EBV_genes_norm_filt_noSex_protlinc_kids.pdf", width = 7, height=5)
+generate_heatmap(EBV_genes_norm_filt_noSex_protlincEBV[,-c(1,2,13:16)], "genes_norm_filt_noSex_protlinc_kids")
+dev.off()
+```
+
+
+```{r explore-data, echo=TRUE, warning=FALSE, message = FALSE}
+facts <- as.factor(colnames(genes_norm_filt_noSex_prot)[-1])
+colors <- colorRampPalette(brewer.pal(11, "Spectral"))(17)
+set_protlinc <- 
+  newSeqExpressionSet(as.matrix(genes_norm_filt_noSex_protlinc_childfilt[,-1]),
+                      phenoData = data.frame(facts,
+                                             row.names=colnames(genes_norm_filt_noSex_protlinc_childfilt)[-1]))
+
+pdf(file = "RLE_genes_norm_filt_noSex_noEbv_protlinc.pdf", width = 6, height = 4, family="ArialMT")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2)) 
+title("Genes norm filt noSex noEBV protlinc")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2), col=color_sex[facts_sex]) 
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2), col=color_EBV[facts_EBV]) 
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2), col=color_harvest[facts_harvest]) 
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2), col=color_extract[facts_extract]) 
+title("Genes norm filt noSex noEBV protlinc colextract")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2), col=color_extract[facts_gen]) 
+title("Genes norm filt noSex noEBV protlinc colGen")
+plotRLE(set_protlinc, outline=FALSE, ylim=c(-2, 2), col=color_extract[facts_mito]) 
+title("Genes norm filt noSex noEBV protlinc colMito")
+dev.off()
+
+pdf(file = "PCA_genes_norm_filt_noSex_noEbv_protlinc.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_protlinc, col=colors[facts], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc")
+plotPCA(set_protlinc, col=color_sex[facts_sex], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotPCA(set_protlinc, col=color_EBV[facts_EBV], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotPCA(set_protlinc, col=color_harvest[facts_harvest], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc, col=color_extract[facts_extract], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colextract")
+plotPCA(set_protlinc, col=color_extract[facts_gen], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colGen")
+plotPCA(set_protlinc, col=color_extract[facts_mito], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colMito")
+dev.off()
+
+pdf(file = "PCA_k3_genes_norm_filt_noSex_noEbv_protlinc.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_protlinc, col=colors[facts], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc")
+plotPCA(set_protlinc, col=color_sex[facts_sex], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotPCA(set_protlinc, col=color_EBV[facts_EBV], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotPCA(set_protlinc, col=color_harvest[facts_harvest], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc, col=color_extract[facts_extract], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colextract")
+plotPCA(set_protlinc, col=color_harvest[facts_gen], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc, col=color_extract[facts_mito], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colMito")
+dev.off()
+
+# correlation heatmap of the data
+source("../../Correlation_plots4.R")
+pdf(file="Cor_plot_genes_norm_filt_noSex_protlinc.pdf", width = 7, height=5)
+generate_heatmap(genes_norm_filt_noSex_protlinc_childfilt[,-1], "genes_norm_filt_noSex_protlinc")
+dev.off()
+
+# making a PCA heatmap of the data
+pca_protlinc <- princomp(genes_norm_filt_noSex_protlinc_childfilt[,-1])
+  
+Sex_protlinc.p<-c()
+for (i in seq(1:10)){
+  Sex<-metadata[,3]
+  Sex<-lm(pca_protlinc$loadings[,i]~Sex)
+  Sex_protlinc.p<-c(Sex_protlinc.p, anova(Sex)$Pr[1])
+}
+  
+Mito_protlinc.p<-c()
+  for (i in seq(1:10)){
+    Mito<-metadata[,4]
+    Mito<-lm(pca_protlinc$loadings[,i]~Mito)
+    Mito_protlinc.p<-c(Mito_protlinc.p, anova(Mito)$Pr[1])
+}
+  
+harvest_protlinc.p<-c()
+for (i in seq(1:10)){
+    harvest<-metadata[,5]
+    harvest<-lm(pca_protlinc$loadings[,i]~harvest)
+    harvest_protlinc.p<-c(harvest_protlinc.p, anova(harvest)$Pr[1])
+}
+  
+extract_protlinc.p<-c()
+for (i in seq(1:10)){
+    extract<-metadata[,6]
+    extract<-lm(pca_protlinc$loadings[,i]~extract)
+    extract_protlinc.p<-c(extract_protlinc.p, anova(extract)$Pr[1])
+}
+  
+Lane1_protlinc.p<-c()
+for (i in seq(1:10)){
+    Lane1<-metadata[,7]
+    Lane1<-lm(pca_protlinc$loadings[,i]~Lane1)
+    Lane1_protlinc.p<-c(Lane1_protlinc.p, anova(Lane1)$Pr[1])
+}
+  
+Lane2_protlinc.p<-c()
+for (i in seq(1:10)){
+    Lane2<-metadata[,8]
+    Lane2<-lm(pca_protlinc$loadings[,i]~Lane2)
+    Lane2_protlinc.p<-c(Lane2_protlinc.p, anova(Lane2)$Pr[1])
+}
+  
+generation_protlinc.p<-c()
+for (i in seq(1:10)){
+    generation<-metadata[,9]
+    generation<-lm(pca_protlinc$loadings[,i]~generation)
+    generation_protlinc.p<-c(generation_protlinc.p, anova(generation)$Pr[1])
+}
+
+ebv_protlinc.p<-c()
+for (i in seq(1:10)){
+    ebv<-metadata[,11]
+    ebv<-lm(pca_protlinc$loadings[,i]~ebv)
+    ebv_protlinc.p<-c(ebv_protlinc.p, anova(ebv)$Pr[1])
+}
+  
+pvals_raw_protlinc<-rbind(Sex_protlinc.p,Mito_protlinc.p,harvest_protlinc.p,extract_protlinc.p,Lane1_protlinc.p,Lane2_protlinc.p, generation_protlinc.p,ebv_protlinc.p)
+pvals_raw_protlinc<-data.matrix(pvals_raw_protlinc)
+rownames(pvals_raw_protlinc)<-colnames(metadata[,-c(1,2,10)])
+  
+hmcol<-colorRampPalette(brewer.pal(9,"Blues"))(4)
+hmcol[1]<-"white"
+logpvals_protlinc <- -log10(pvals_raw_protlinc)
+pdf(file="PCA_heatmap_genes_norm_filt_noSex_protlinc.pdf", width = 10, height=6)
+heatmap.2(logpvals_protlinc,Rowv=F,Colv=colnames(logpvals_protlinc),dendrogram='none',trace='none',
+            margins=c(8,8),colsep=c(1:11),rowsep=c(1:16),
+            sepwidth=c(0.025,0.025), sepcolor="black", col=hmcol, breaks=c(0,1.30103,2,3,max(logpvals_protlinc)),
+            key.xlab = "-log10 pvalue", main="Genes Norm filt noSexEBV")  
+dev.off()
+p_var_explained_protlinc = pca_protlinc$sdev^2 / sum(pca_protlinc$sdev^2)
+# plot percentage of variance explained for each principal component    
+barplot(100*p_var_explained_protlinc, las=2, xlab='', ylab='% Variance Explained', 
+          main="Variance Explained rlog of norm filt noSex Genes")
+# get top ten
+p_var_explained_protlinc_10 <- p_var_explained_protlinc[1:10]
+PCs <- paste("PC", seq(1, 10, 1), sep="")
+names(p_var_explained_protlinc_10) <- PCs
+# plot percentage of variance explained for each principal component
+pdf(file="PCA_heatmap_genes_norm_filt_noSex_protlinc_barVar.pdf", width = 6, height=4)
+barplot(100*p_var_explained_protlinc_10, las=2, xlab='', ylab='% Variance Explained', 
+        main="Variance Explained by component", 
+        ylim = c(0,100))
+dev.off()
+
+ # looking at GC bias and length bias in the libraries
+GC_gene_info <- read.table("../../Montgomery_RNA/Sleuth/Gene_GCContent_DF.txt", header=T)
+head(GC_gene_info)
+dim(GC_gene_info) # 60725 3
+genes_norm_filt_noSex_protlinc_merge <- merge(genes_norm_filt_noSex_protlinc_childfilt, GC_gene_info, by.x="ens_gene", 
+                               by.y= "X4_usercol")
+head(genes_norm_filt_noSex_protlinc_merge)
+dim(genes_norm_filt_noSex_protlinc_merge) # 14806    20
+feature_protlinc <- data.frame(gc=genes_norm_filt_noSex_protlinc_merge$X8_pct_gc,length=genes_norm_filt_noSex_protlinc_merge$X15_seq_len)
+dim(feature_protlinc)
+feature_protlinc$length <- as.numeric(feature_protlinc$length)
+set_protlinc_feat <- newSeqExpressionSet(counts=as.matrix(genes_norm_filt_noSex_protlinc_merge[,-c(1,19,20)]),
+                            featureData=feature_protlinc, 
+                            phenoData = data.frame(facts, 
+                                        row.names=colnames(genes_norm_filt_noSex_protlinc_merge)[-c(1,19,20)]))
+
+pdf(file="GC_bias_genes_norm_filt_noSex_protlinc.pdf", width = 6, height = 4)
+counts <- counts(set_protlinc_feat)
+y <- fData(set_protlinc_feat)[,"gc"]
+x <- log(counts + 0.1)
+cutoff<-1000
+head(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x)
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=colors[1], ylab = "gene counts", xlab="gc", main="GC Bias in Samples", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=colors[i],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts),fill=colors[facts], xpd=TRUE, ncol = 6, cex=.8)
+dev.off()
+
+pdf(file="length_bias_genes_norm_filt_noSex_protlinc.pdf", width = 8, height = 6)
+counts <- counts(set_protlinc_feat)
+y <- fData(set_protlinc_feat)[,"length"]
+x <- log(counts + 0.1)
+cutoff<-1000
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=colors[1], ylab = "gene counts", xlab="length", main="Length Bias in Samples", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=colors[i],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts),fill=colors[facts], xpd=TRUE, ncol = 6, cex=.8)
+
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=color_sex[facts_sex[1]], ylab = "gene counts", xlab="length", main="Length Bias in Samples colSex", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=color_sex[facts_sex[i]],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts_sex),fill=color_sex[facts_sex], xpd=TRUE, ncol = 6, cex=.8)
+
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=color_extract[facts_extract[1]], ylab = "gene counts", xlab="length", main="Length Bias in Samples colExtract", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=color_extract[facts_extract[i]],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts_extract),fill=color_extract[facts_extract], xpd=TRUE, ncol = 6, cex=.8)
+
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=color_harvest[facts_harvest[1]], ylab = "gene counts", xlab="length", main="Length Bias in Samples colHarvest", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=color_harvest[facts_harvest[i]],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts_harvest),fill=color_harvest[facts_harvest], xpd=TRUE, ncol = 6, cex=.8)
+
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=color_EBV[facts_EBV[1]], ylab = "gene counts", xlab="length", main="Length Bias in Samples colEBV", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=color_EBV[facts_EBV[i]],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts_EBV),fill=color_EBV[facts_EBV], xpd=TRUE, ncol = 6, cex=.8)
+
+plot(lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$x,lowess(y[x[,1]<=cutoff],x[x[,1]<=cutoff,1])$y, type='l',col=color_EBV[facts_gen[1]], ylab = "gene counts", xlab="length", main="Length Bias in Samples colGen", ylim=c(0,8))
+if(ncol(x)>1) {
+  for(i in 2:ncol(x)) {
+    lines(lowess(y[x[,i]<=cutoff],x[x[,i]<=cutoff,i]),col=color_EBV[facts_gen[i]],type='l')
+  }
+}
+legend("bottom",legend = as.character(facts_gen),fill=color_EBV[facts_gen], xpd=TRUE, ncol = 6, cex=.8)
+dev.off()
+```
+
+```{r explore-datakids, echo=TRUE, warning=FALSE, message = FALSE}
+
+facts_kids <- as.factor(colnames(genes_norm_filt_noSex_prot)[-c(1:3,14:17)])
+set_protlinc_kids <- newSeqExpressionSet(as.matrix(genes_norm_filt_noSex_protlinc_childfilt[,-c(1:3,14:17)]),
+                           phenoData = data.frame(facts_kids, 
+                                                  row.names=colnames(genes_norm_filt_noSex_protlinc_childfilt)[-c(1:3,14:17)]))
+
+metadata_kids <- metadata[-c(1,2,13:16),]
+colors_kids <- colorRampPalette(brewer.pal(11, "Spectral"))(11)
+facts_sex_kids <- metadata_kids$sex
+facts_EBV_kids <- metadata_kids$EBV_cut
+facts_harvest_kids <- metadata_kids$harvest
+facts_extract_kids <- metadata_kids$extract
+
+pdf(file = "RLE_genes_norm_filt_noSex_noEbv_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2), col=colors_kids[facts_kids]) 
+title("Genes norm filt noSex noEBV Kids")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2), col=color_sex[facts_sex_kids]) 
+title("Genes norm filt noSex noEBV Kids colSex")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2), col=color_EBV[facts_EBV_kids]) 
+title("Genes norm filt noSex noEBV Kids colEBV")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2),
+        col=color_harvest[facts_harvest_kids]) 
+title("Genes norm filt noSex noEBV Kids colharvest")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2),
+        col=color_extract[facts_extract_kids]) 
+title("Genes norm filt noSex noEBV Kids colExtract")
+dev.off()
+
+pdf(file = "PCA_genes_norm_filt_noSex_noEbv_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_protlinc_kids, col=colors_kids[facts_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc")
+plotPCA(set_protlinc_kids, col=color_sex[facts_sex_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotPCA(set_protlinc_kids, col=color_EBV[facts_EBV_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotPCA(set_protlinc_kids, col=color_harvest[facts_harvest_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc_kids, col=color_extract[facts_extract_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colextract")
+dev.off()
+
+pdf(file = "PCA_k3_genes_norm_filt_noSex_noEbv_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_protlinc_kids, col=colors_kids[facts_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc")
+plotPCA(set_protlinc_kids, col=color_sex[facts_sex_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotPCA(set_protlinc_kids, col=color_EBV[facts_EBV_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotPCA(set_protlinc_kids, col=color_harvest[facts_harvest_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc_kids, col=color_extract[facts_extract_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colextract")
+dev.off()
+
+# correlation heatmap of the data
+pdf(file="Cor_plot_genes_norm_filt_noSex_protlinc_kids.pdf", width = 7, height=5)
+generate_heatmap(genes_norm_filt_noSex_protlinc_childfilt[,-c(1:3,14:17)], "genes_norm_filt_noSex_protlinc_kids")
+dev.off()
+
+# making a PCA heatmap of the data
+pca_protlinc_kids <- princomp(genes_norm_filt_noSex_protlinc_childfilt[,-c(1:3,14:17)])
+
+Sex_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+  Sex<-metadata_kids[,3]
+  Sex<-lm(pca_protlinc_kids$loadings[,i]~Sex)
+  Sex_protlinc_kids.p<-c(Sex_protlinc_kids.p, anova(Sex)$Pr[1])
+}
+  
+harvest_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    harvest<-metadata_kids[,5]
+    harvest<-lm(pca_protlinc_kids$loadings[,i]~harvest)
+    harvest_protlinc_kids.p<-c(harvest_protlinc_kids.p, anova(harvest)$Pr[1])
+}
+  
+extract_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    extract<-metadata_kids[,6]
+    extract<-lm(pca_protlinc_kids$loadings[,i]~extract)
+    extract_protlinc_kids.p<-c(extract_protlinc_kids.p, anova(extract)$Pr[1])
+}
+  
+Lane1_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    Lane1<-metadata_kids[,7]
+    Lane1<-lm(pca_protlinc_kids$loadings[,i]~Lane1)
+    Lane1_protlinc_kids.p<-c(Lane1_protlinc_kids.p, anova(Lane1)$Pr[1])
+}
+  
+Lane2_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    Lane2<-metadata_kids[,8]
+    Lane2<-lm(pca_protlinc_kids$loadings[,i]~Lane2)
+    Lane2_protlinc_kids.p<-c(Lane2_protlinc_kids.p, anova(Lane2)$Pr[1])
+}
+
+ebv_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    ebv<-metadata_kids[,11]
+    ebv<-lm(pca_protlinc_kids$loadings[,i]~ebv)
+    ebv_protlinc_kids.p<-c(ebv_protlinc_kids.p, anova(ebv)$Pr[1])
+}
+
+pvals_raw_protlinc_kids<-rbind(Sex_protlinc_kids.p,harvest_protlinc_kids.p,extract_protlinc_kids.p,Lane1_protlinc_kids.p,Lane2_protlinc_kids.p,ebv_protlinc_kids.p)
+pvals_raw_protlinc_kids<-data.matrix(pvals_raw_protlinc_kids)
+rownames(pvals_raw_protlinc_kids)<-colnames(metadata_kids[,-c(1,2,4,9,10)])
+
+hmcol2 <- hmcol[1:3]
+logpvals_protlinc_kids <- -log10(pvals_raw_protlinc_kids)
+pdf(file="PCA_heatmap_genes_norm_filt_noSex_protlinc_kids.pdf", width = 10, height=6)
+heatmap.2(logpvals_protlinc_kids,Rowv=F,Colv=colnames(pvals_raw_protlinc_kids),dendrogram='none',trace='none',
+            margins=c(8,8),colsep=c(1:11),rowsep=c(1:16),
+            sepwidth=c(0.025,0.025), sepcolor="black", col=hmcol2, breaks=c(0,1.30103,2,3),
+            key.xlab = "-log10 pvalue", main="Genes Norm filt noSexEBV Kids")  
+dev.off()
+## Variance explained by each component:
+p_var_explained_protlinc_kids <- pca_protlinc_kids$sdev^2 / sum(pca_protlinc_kids$sdev^2)
+# plot percentage of variance explained for each principal component    
+barplot(100*p_var_explained_protlinc_kids, las=2, xlab='', ylab='% Variance Explained', 
+          main="Variance Explained rlog of norm filt noSex Genes")
+# get top ten
+p_var_explained_protlinc_kids_10 <- p_var_explained_protlinc_kids[1:10]
+names(p_var_explained_protlinc_kids_10) <- PCs
+# plot percentage of variance explained for each principal component  
+pdf(file="PCA_heatmap_genes_norm_filt_noSex_protlinc_kids_barVar.pdf", width = 6, height=4)
+barplot(100*p_var_explained_protlinc_kids_10, las=2, xlab='', ylab='% Variance Explained', 
+        main="Variance Explained by component", 
+        ylim = c(0,100))
+dev.off()
+
+# The GC and length bias won't change
+```
+
+```{r explore-datakids2, echo=TRUE, warning=FALSE, message = FALSE}
+
+facts_kids <- as.factor(colnames(genes_norm_filt_noSex_prot)[-c(1:3,14:17)])
+set_protlinc_kids <- newSeqExpressionSet(as.matrix(genes_norm_filt_noSex_protlinc_childfilt2[,-c(1:3,14:17)]),
+                           phenoData = data.frame(facts_kids, 
+                                                  row.names=colnames(genes_norm_filt_noSex_protlinc_childfilt2)[-c(1:3,14:17)]))
+
+metadata_kids <- metadata[-c(1,2,13:16),]
+colors_kids <- colorRampPalette(brewer.pal(11, "Spectral"))(11)
+facts_sex_kids <- metadata_kids$sex
+facts_EBV_kids <- metadata_kids$EBV_cut
+facts_harvest_kids <- metadata_kids$harvest
+facts_extract_kids <- metadata_kids$extract
+
+pdf(file = "RLE_genes_norm_filt_noSex_noEbv_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2), col=colors_kids[facts_kids]) 
+title("Genes norm filt noSex noEBV Kids")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2), col=color_sex[facts_sex_kids]) 
+title("Genes norm filt noSex noEBV Kids colSex")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2), col=color_EBV[facts_EBV_kids]) 
+title("Genes norm filt noSex noEBV Kids colEBV")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2),
+        col=color_harvest[facts_harvest_kids]) 
+title("Genes norm filt noSex noEBV Kids colharvest")
+plotRLE(set_protlinc_kids, outline=FALSE, ylim=c(-2, 2),
+        col=color_extract[facts_extract_kids]) 
+title("Genes norm filt noSex noEBV Kids colExtract")
+dev.off()
+
+pdf(file = "PCA_genes_norm_filt_noSex_noEbv_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_protlinc_kids, col=colors_kids[facts_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc")
+plotPCA(set_protlinc_kids, col=color_sex[facts_sex_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotPCA(set_protlinc_kids, col=color_EBV[facts_EBV_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotPCA(set_protlinc_kids, col=color_harvest[facts_harvest_kids], cex=1.2, k=2)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc_kids, col=color_extract[facts_extract_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colextract")
+dev.off()
+
+??plotPCA
+
+plotPCA(set_protlinc_kids, col=color_EBV[facts_EBV_kids], cex=1.2, k=2)
+
+plot(set_protlinc_kids_pca$loadings[,1], set_protlinc_kids_pca$loadings[,2])
+dim(set_protlinc_kids_pca$scores)
+set_protlinc_kids_pca <- princomp(set_protlinc_kids@assayData$counts)
+set_protlinc_kids_pca <- pca(set_protlinc_kids@assayData$counts, exclude=F)
+
+dim(set_protlinc_kids_pca$variances)
+dataGG = data.frame(PC1 = set_protlinc_kids_pca$loadings[,1], 
+                    PC2 = set_protlinc_kids_pca$loadings[,2], 
+                    PC3 = set_protlinc_kids_pca$loadings[,3],
+                    PC4 = set_protlinc_kids_pca$loadings[,4], 
+                    extract = facts_extract_kids,
+                    EBV = facts_EBV_kids)
+class(set_protlinc_kids_pca$loadings)
+pca()
+?pca
+(qplot(PC1, PC2, data = dataGG, color =  extract, shape= facts_EBV_kids,
+       main = "PC1 vs PC3", size = I(6))
+ + labs(x = paste0("PC1, VarExp:", round(set_protlinc_kids_pca$variances[1],4)),
+        y = paste0("PC2, VarExp:", round(set_protlinc_kids_pca$variances[2],4)))
+ + scale_colour_brewer(type="qual", palette=2)
+ )
+
+pdf(file = "PCA_k3_genes_norm_filt_noSex_noEbv_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+plotPCA(set_protlinc_kids, col=colors_kids[facts_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc")
+plotPCA(set_protlinc_kids, col=color_sex[facts_sex_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colSex")
+plotPCA(set_protlinc_kids, col=color_EBV[facts_EBV_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colEBV")
+plotPCA(set_protlinc_kids, col=color_harvest[facts_harvest_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colharvest")
+plotPCA(set_protlinc_kids, col=color_extract[facts_extract_kids], cex=1.2, k=3)
+title("Genes norm filt noSex noEBV protlinc colextract")
+dev.off()
+
+# correlation heatmap of the data
+pdf(file="Cor_plot_genes_norm_filt_noSex_protlinc_kids2.pdf", width = 7, height=5)
+generate_heatmap(genes_norm_filt_noSex_protlinc_childfilt2[,-c(1:3,14:17)], "genes_norm_filt_noSex_protlinc_kids")
+dev.off()
+
+# making a PCA heatmap of the data
+pca_protlinc_kids <- princomp(genes_norm_filt_noSex_protlinc_childfilt[,-c(1:3,14:17)])
+
+Sex_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+  Sex<-metadata_kids[,3]
+  Sex<-lm(pca_protlinc_kids$loadings[,i]~Sex)
+  Sex_protlinc_kids.p<-c(Sex_protlinc_kids.p, anova(Sex)$Pr[1])
+}
+  
+harvest_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    harvest<-metadata_kids[,5]
+    harvest<-lm(pca_protlinc_kids$loadings[,i]~harvest)
+    harvest_protlinc_kids.p<-c(harvest_protlinc_kids.p, anova(harvest)$Pr[1])
+}
+  
+extract_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    extract<-metadata_kids[,6]
+    extract<-lm(pca_protlinc_kids$loadings[,i]~extract)
+    extract_protlinc_kids.p<-c(extract_protlinc_kids.p, anova(extract)$Pr[1])
+}
+  
+Lane1_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    Lane1<-metadata_kids[,7]
+    Lane1<-lm(pca_protlinc_kids$loadings[,i]~Lane1)
+    Lane1_protlinc_kids.p<-c(Lane1_protlinc_kids.p, anova(Lane1)$Pr[1])
+}
+  
+Lane2_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    Lane2<-metadata_kids[,8]
+    Lane2<-lm(pca_protlinc_kids$loadings[,i]~Lane2)
+    Lane2_protlinc_kids.p<-c(Lane2_protlinc_kids.p, anova(Lane2)$Pr[1])
+}
+
+ebv_protlinc_kids.p<-c()
+for (i in seq(1:10)){
+    ebv<-metadata_kids[,11]
+    ebv<-lm(pca_protlinc_kids$loadings[,i]~ebv)
+    ebv_protlinc_kids.p<-c(ebv_protlinc_kids.p, anova(ebv)$Pr[1])
+}
+
+pvals_raw_protlinc_kids<-rbind(Sex_protlinc_kids.p,harvest_protlinc_kids.p,extract_protlinc_kids.p,Lane1_protlinc_kids.p,Lane2_protlinc_kids.p,ebv_protlinc_kids.p)
+pvals_raw_protlinc_kids<-data.matrix(pvals_raw_protlinc_kids)
+rownames(pvals_raw_protlinc_kids)<-colnames(metadata_kids[,-c(1,2,4,9,10)])
+
+hmcol2 <- hmcol[1:3]
+logpvals_protlinc_kids <- -log10(pvals_raw_protlinc_kids)
+pdf(file="PCA_heatmap_genes_norm_filt_noSex_protlinc_kids2.pdf", width = 10, height=6)
+heatmap.2(logpvals_protlinc_kids,Rowv=F,Colv=colnames(pvals_raw_protlinc_kids),dendrogram='none',trace='none',
+            margins=c(8,8),colsep=c(1:11),rowsep=c(1:16),
+            sepwidth=c(0.025,0.025), sepcolor="black", col=hmcol2, breaks=c(0,1.30103,2,3),
+            key.xlab = "-log10 pvalue", main="Genes Norm filt noSexEBV Kids")  
+dev.off()
+## Variance explained by each component:
+p_var_explained_protlinc_kids <- pca_protlinc_kids$sdev^2 / sum(pca_protlinc_kids$sdev^2)
+# plot percentage of variance explained for each principal component    
+barplot(100*p_var_explained_protlinc_kids, las=2, xlab='', ylab='% Variance Explained', 
+          main="Variance Explained rlog of norm filt noSex Genes")
+# get top ten
+p_var_explained_protlinc_kids_10 <- p_var_explained_protlinc_kids[1:10]
+names(p_var_explained_protlinc_kids_10) <- PCs
+# plot percentage of variance explained for each principal component  
+pdf(file="PCA_heatmap_genes_norm_filt_noSex_protlinc_kids_barVar2.pdf", width = 6, height=4)
+barplot(100*p_var_explained_protlinc_kids_10, las=2, xlab='', ylab='% Variance Explained', 
+        main="Variance Explained by component", 
+        ylim = c(0,100))
+dev.off()
+
+# The GC and length bias won't change
+```
+
+Now that we have the normalized gene counts and exlored batch influences, we will call eQTLs via linear modeling of the parental haplotypes.
+```{r eQTL-calling, echo=TRUE, warning=FALSE, message = FALSE}
+ # performing the eQTL calling 
+
+# making an object with the sex of the children
+Sex_child <- c("F","F","F","M","M","M","F","M","F","M","M")
+length(Sex_child)
+Sex_child_factor <- as.factor(Sex_child)
+ 
+  # load in haplotype data
+Haplo_data_edit<- readRDS("../../QTLs_2017/Haplo_data_edit_forQTL.rds")
+
+# loading in the genes intersected with platinum haplotype information
+Genes_haplo_inter <- read.table("../../QTLs_2017/RNA_haplo_intersect.txt")
+head(Genes_haplo_inter)
+table(Genes_haplo_inter$V1)  # no sex chr
+table(table(Genes_haplo_inter$V4)) # 56837 + 342 + 15 genes tested;
+# 342 trans tested twice; 15 tested 3 times
+dim(Genes_haplo_inter) # 57566   11
+
+grep("ENSG00000134184", genes_norm_filt_noSex_protlinc_childfilt2$ens_gene)
+
+# merging the gene count values with the haplotype peak intersection information
+Genes_inter_vals_protlinc <- merge(x=Genes_haplo_inter, y=genes_norm_filt_noSex_protlinc_childfilt, by.x = "V4", by.y = "ens_gene",sort = F)
+head(Genes_inter_vals_protlinc)
+dim(Genes_inter_vals_protlinc) # 14964 28 # 158 more because of  342 + 15 potentially double/triple counted genes
+
+# merging the counts with haplotype-peak intersect with haplo-genotype information
+Genes_haplo_protlinc <- merge(x = Genes_inter_vals_protlinc, y=Haplo_data_edit, by.x = "V10", by.y = "V17", all.x=T, sort = F)
+head(Genes_haplo_protlinc)
+dim(Genes_haplo_protlinc) # [1] 14964     53
+
+#setup the objects for anova loop
+Gene_names_protlinc <- Genes_haplo_protlinc$V4
+length(Gene_names_protlinc) # 14964
+counts_protlinc <- Genes_haplo_protlinc[,c(14:23,28)]
+head(counts_protlinc)
+summary(rowMeans(counts_protlinc))
+dim(counts_protlinc)
+Gene_pat_protlinc <- Genes_haplo_protlinc[,c(32,34,36,38,40,42,44,46,48,50,52)]
+head(Gene_pat_protlinc)
+dim(Gene_pat_protlinc)
+Gene_mat_protlinc <- Genes_haplo_protlinc[,c(33,35,37,39,41,43,45,47,49,51,53)]
+head(Gene_mat_protlinc)
+dim(Gene_mat_protlinc)
+
+gene_anova_pval_m_protlinc <- rep(1,nrow(counts_protlinc))
+gene_anova_pval_p_protlinc <- rep(1,nrow(counts_protlinc))
+
+i<- grep("ENSG00000136111", Gene_names_protlinc)
+for (i in 1:nrow(counts_protlinc)){
+  y <- t(counts_protlinc[i,])
+  m <- t(Gene_mat_protlinc[i,])
+  p <- t(Gene_pat_protlinc[i,])
+  temp_df <- cbind(y,m,p)
+  colnames(temp_df) <- c("y","m","p")
+  full_model <- lm(formula = y ~ m + p + metadata_kids$extract + EBV_covariate_value[-c(1,2,13:16)], data=as.data.frame(temp_df))
+  if (length(anova(full_model)==5)) {
+  gene_anova_pval_m_protlinc[i] <- anova(full_model)$Pr[1] 
+  gene_anova_pval_p_protlinc[i] <- anova(full_model)$Pr[2]
+  }
+  else {
+    gene_anova_pval_m_protlinc[i] <- anova(full_model)$Pr[1] 
+  }
+}
+summary(full_model)
+length(gene_anova_pval_m_protlinc) # 14964
+sum(is.na(gene_anova_pval_m_protlinc)) # 0
+names(gene_anova_pval_m_protlinc)<-Gene_names_protlinc
+sum(gene_anova_pval_m_protlinc==0) # 0
+pdf(file = "Histogram_maternal_pvals_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+qplot(gene_anova_pval_m_protlinc, main="eQTL-ProtLNC maternal p-value distribution", xlab="p-value")
+dev.off()
+summary(gene_anova_pval_m_protlinc)
+qvals_gene_anova_m_protlinc <- qvalue(gene_anova_pval_m_protlinc, fdr.level=.4)
+head(qvals_gene_anova_m_protlinc$qvalues)
+sum(qvals_gene_anova_m_protlinc$significant, na.rm = T) #183
+sum(qvals_gene_anova_m_protlinc$qvalues < .1,  na.rm = T) # 3
+sum(qvals_gene_anova_m_protlinc$qvalues < .05,  na.rm = T) # 0
+pdf(file = "Histogram_maternal_qvals_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+qplot(qvals_gene_anova_m_protlinc$qvalues, main="gene-eQTL maternal q-value distribution TMM", xlab="q-value") +
+geom_vline(xintercept = .4, color="red", linetype="dashed")
+dev.off()
+length(gene_anova_pval_p_protlinc) # 14964
+sum(is.na(gene_anova_pval_p_protlinc)) # 0
+names(gene_anova_pval_p_protlinc)<-Gene_names_protlinc
+sum(gene_anova_pval_p_protlinc==0) # NA
+pdf(file = "Histogram_paternal_pvals_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+qplot(gene_anova_pval_p_protlinc, main="gene-eQTL paternal p-value distribution", xlab="p-value") 
+dev.off()
+summary(gene_anova_pval_p_protlinc)
+qvals_gene_anova_p_protlinc <- qvalue(gene_anova_pval_p_protlinc, fdr.level=.4)
+sum(qvals_gene_anova_p_protlinc$significant, na.rm = T) # 206
+sum(qvals_gene_anova_p_protlinc$qvalues < .1,  na.rm = T) # 1
+sum(qvals_gene_anova_p_protlinc$qvalues < .05,  na.rm = T) # 1
+pdf(file = "Histogram_paternal_qvals_protlinc_kids.pdf", width = 6, height = 4, family="ArialMT")
+qplot(qvals_gene_anova_p_protlinc$qvalues, main="gene-eQTL paternal q-value distribution TMM", xlab="q-value") +
+  geom_vline(xintercept = .4, color="red", linetype="dashed")
+dev.off()
+grep("ENSG00000134184", genes_norm_filt_noSex_protlinc_childfilt$ens_gene)
+qvals_gene_anova_p_protlinc$qvalues[grep("ENSG00000134184", names(gene_anova_pval_p_protlinc))]
+qvals_gene_anova_m_protlinc$qvalues[grep("ENSG00000134184", names(gene_anova_pval_m_protlinc))]
+
+
+idx_sig_m_protlinc <- which(qvals_gene_anova_m_protlinc$significant)
+idx_sig_p_protlinc <- which(qvals_gene_anova_p_protlinc$significant)
+cat_p_m_protlinc <- c(idx_sig_m_protlinc, idx_sig_p_protlinc)
+sum(duplicated(cat_p_m_protlinc)) #22
+cat_p_m_protlinc <- cat_p_m_protlinc[!duplicated(cat_p_m_protlinc)]
+length(cat_p_m_protlinc) # 367
+
+# get the index for the significant peaks
+sig_genes_protlinc <- Gene_names_protlinc[cat_p_m_protlinc]
+length(sig_genes_protlinc) #367
+head(sig_genes_protlinc)
+
+grep("ENSG00000134184", sig_genes_protlinc)
+
+grep("ENSG00000143641.9",Genes_haplo_protlinc$V4, value=F)
+
+# plot the signficant peaks - .5
+plot_count_haplo_list_protlinc <- list()
+f<-1
+for (i in cat_p_m_protlinc){
+  y <- t(counts_protlinc[i,])
+  m <- t(Gene_mat_protlinc[i,])
+  p <- t(Gene_pat_protlinc[i,])
+  temp_df <- cbind(y,m,p, 0,Sex_child_factor)
+  colnames(temp_df) <- c("y","m","p","g","sex")
+  temp_df <- as.data.frame(temp_df)
+  for (j in 1:nrow(temp_df)) {
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 0){temp_df$g[j] <- "0/0"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 0){temp_df$g[j] <- "1/0"}
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 1){temp_df$g[j] <- "0/1"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 1){temp_df$g[j] <- "1/1"}
+  }
+  temp_plot <- ggplot(temp_df, aes(factor(g), y))
+  temp_plot <- temp_plot + geom_boxplot() + 
+    geom_jitter(aes(colour=factor(sex,labels=c("Female","Male")))) +
+    scale_color_discrete(name = "Gender") +
+    ggtitle(Genes_haplo_protlinc$V4[i]) +
+    ylab("Gene Counts") + xlab("Haplotype")
+  plot_count_haplo_list_protlinc[[f]] <- temp_plot
+  f <- f+1
+}
+length(plot_count_haplo_list_protlinc) # 367
+random_samp <- sample(seq(1,20), 6)
+multiplot(plotlist = plot_count_haplo_list_protlinc[random_samp], cols = 2)
+seq(6,372,6)
+pdf(file = "expression_genotype_QTL_.4.pdf", family="ArialMT")
+j<-1
+for (i in seq(6,372,6)){
+  multiplot(plotlist = plot_count_haplo_list_protlinc[j:i], cols = 2)
+  j <- i+1
+}
+dev.off()
+
+# save the plots 
+saveRDS(plot_count_haplo_list_protlinc, "eQTL_plot_count_haplo_list_protlinc2.rds")
+
+# generate bed files and summary tables of the eQTLs
+# make an eQTL dataframe 
+sig_qvals_protlinc <- data.frame(Genes=Gene_names_protlinc[cat_p_m_protlinc],
+                        qval_m=qvals_gene_anova_m_protlinc$qvalues[cat_p_m_protlinc],
+                        qval_p=qvals_gene_anova_p_protlinc$qvalues[cat_p_m_protlinc])
+head(sig_qvals_protlinc)
+
+# match the genes with gene symbols
+t2g_genes <- t2g_mine[!duplicated(t2g_mine$ens_gene),2:3]
+dim(t2g_genes) # 60825
+sig_qvals_merge_protlinc <- merge(x=sig_qvals_protlinc, y=t2g_genes, by.x = "Genes", by.y = "ens_gene", all.x = T, sort=F)
+sum(duplicated(sig_qvals_merge_protlinc$Genes)) #1
+ # both haploytypes are significant
+Genes_haplo_protlinc[1462:1463,]
+head(sig_qvals_merge_protlinc)
+dim(sig_qvals_merge_protlinc)
+
+grep("ENSG00000134184.12", sig_qvals_merge_protlinc$Genes)
+
+write.table(sig_qvals_merge_protlinc, file="sig_genes_protlinc.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+# add on the haplo number to each gene
+Genes_haplo_protlinc_sig <- Genes_haplo_protlinc[cat_p_m_protlinc,]
+dim(Genes_haplo_protlinc_sig)
+Genes_haplo_protlinc_sig <- cbind(Genes_haplo_protlinc_sig,sig_qvals_merge_protlinc)
+sum(Genes_haplo_protlinc_sig$V4 ==Genes_haplo_protlinc_sig$Genes) #367
+saveRDS(Genes_haplo_protlinc_sig, "Genes_haplo_protlinc_sig.rds")
+write.table(Genes_haplo_protlinc_sig, file="Genes_haplo_protlinc_sig.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+# get the haplotype bed file that's associated with the gene
+head(Genes_haplo_protlinc_sig)
+protlinc_sig_haplo_bed <- Genes_haplo_protlinc_sig[,c(8:10,1,6,6)]
+head(protlinc_sig_haplo_bed)
+write.table(protlinc_sig_haplo_bed, file="eQTL_protlinc.4_haplo.bed", quote = F, sep = "\t", 
+            row.names = F, col.names = F, append = F)
+
+# make eQTL value list
+gene_eQTL_value_list_protlinc <-list()
+f<-1
+for (i in cat_p_m_protlinc){
+  y <- t(counts_protlinc[i,])
+  m <- t(Gene_mat_protlinc[i,])
+  p <- t(Gene_pat_protlinc[i,])
+  temp_df <- cbind(y,m,p, 0,Sex_child_factor)
+  colnames(temp_df) <- c("y","m","p","g","sex")
+  temp_df <- as.data.frame(temp_df)
+  for (j in 1:nrow(temp_df)) {
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 0){temp_df$g[j] <- "0/0"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 0){temp_df$g[j] <- "1/0"}
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 1){temp_df$g[j] <- "0/1"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 1){temp_df$g[j] <- "1/1"}
+  }
+  temp_df <- temp_df[,c(1,4,5)]
+  gene_eQTL_value_list_protlinc[[f]] <- temp_df
+  names(gene_eQTL_value_list_protlinc)[f] <- as.character(Genes_haplo_protlinc$V4[i])
+  f<-f+1
+}
+length(gene_eQTL_value_list_protlinc)
+gene_eQTL_value_list_protlinc[[1]]
+saveRDS(gene_eQTL_value_list_protlinc,"gene_eQTL_value_list_protlinc.rds")
+```
+
+```{r eQTL-calling2, echo=TRUE, warning=FALSE, message = FALSE}
+ # performing the eQTL calling 
+
+# making an object with the sex of the children
+Sex_child <- c("F","F","F","M","M","M","F","M","F","M","M")
+length(Sex_child)
+Sex_child_factor <- as.factor(Sex_child)
+ 
+  # load in haplotype data
+Haplo_data_edit<- readRDS("../../QTLs_2017/Haplo_data_edit_forQTL.rds")
+
+# loading in the genes intersected with platinum haplotype information
+Genes_haplo_inter <- read.table("../../QTLs_2017/RNA_haplo_intersect.txt")
+head(Genes_haplo_inter)
+table(Genes_haplo_inter$V1)  # no sex chr
+table(table(Genes_haplo_inter$V4)) # 56837 + 342 + 15 genes tested;
+# 342 trans tested twice; 15 tested 3 times
+dim(Genes_haplo_inter) # 57566   11
+
+grep("ENSG00000134184", genes_norm_filt_noSex_protlinc_childfilt2$ens_gene)
+
+# merging the gene count values with the haplotype peak intersection information
+Genes_inter_vals_protlinc <- merge(x=Genes_haplo_inter, y=genes_norm_filt_noSex_protlinc_childfilt2, by.x = "V4", by.y = "ens_gene",sort = F)
+head(Genes_inter_vals_protlinc)
+dim(Genes_inter_vals_protlinc) # 16095 28 # 158 more because of  342 + 15 potentially double/triple counted genes
+table(table(Genes_inter_vals_protlinc$V4)) # 56837 + 342 + 15 genes tested;
+
+
+# merging the counts with haplotype-peak intersect with haplo-genotype information
+Genes_haplo_protlinc <- merge(x = Genes_inter_vals_protlinc, y=Haplo_data_edit, by.x = "V10", by.y = "V17", all.x=T, sort = F)
+head(Genes_haplo_protlinc)
+dim(Genes_haplo_protlinc) # [1] 16095     53
+
+#setup the objects for anova loop
+Gene_names_protlinc <- Genes_haplo_protlinc$V4
+length(Gene_names_protlinc) # 16095
+counts_protlinc <- Genes_haplo_protlinc[,c(14:23,28)]
+head(counts_protlinc)
+summary(rowMeans(counts_protlinc))
+dim(counts_protlinc)
+Gene_pat_protlinc <- Genes_haplo_protlinc[,c(32,34,36,38,40,42,44,46,48,50,52)]
+head(Gene_pat_protlinc)
+dim(Gene_pat_protlinc)
+Gene_mat_protlinc <- Genes_haplo_protlinc[,c(33,35,37,39,41,43,45,47,49,51,53)]
+head(Gene_mat_protlinc)
+dim(Gene_mat_protlinc)
+
+gene_anova_pval_m_protlinc <- rep(1,nrow(counts_protlinc))
+gene_anova_pval_p_protlinc <- rep(1,nrow(counts_protlinc))
+
+i<- grep("ENSG00000136111", Gene_names_protlinc)
+for (i in 1:nrow(counts_protlinc)){
+  y <- t(counts_protlinc[i,])
+  m <- t(Gene_mat_protlinc[i,])
+  p <- t(Gene_pat_protlinc[i,])
+  temp_df <- cbind(y,m,p)
+  colnames(temp_df) <- c("y","m","p")
+  full_model <- lm(formula = y ~ m + p + metadata_kids$extract + EBV_covariate_value[-c(1,2,13:16)], data=as.data.frame(temp_df))
+    full_model2 <- ggelm(formula = y ~ m + p + metadata_kids$extract + EBV_covariate_value[-c(1,2,13:16)], data=as.data.frame(temp_df))
+anova(full_model)
+  
+  if (length(anova(full_model)==5)) {
+  gene_anova_pval_m_protlinc[i] <- anova(full_model)$Pr[1] 
+  gene_anova_pval_p_protlinc[i] <- anova(full_model)$Pr[2]
+  }
+  else {
+    gene_anova_pval_m_protlinc[i] <- anova(full_model)$Pr[1] 
+  }
+}
+length(gene_anova_pval_m_protlinc) # 14964
+sum(is.na(gene_anova_pval_m_protlinc)) # 0
+names(gene_anova_pval_m_protlinc)<-Gene_names_protlinc
+sum(gene_anova_pval_m_protlinc==0) # 0
+pdf(file = "Histogram_maternal_pvals_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+qplot(gene_anova_pval_m_protlinc, main="eQTL-ProtLNC maternal p-value distribution", xlab="p-value")
+dev.off()
+summary(gene_anova_pval_m_protlinc)
+qvals_gene_anova_m_protlinc <- qvalue(gene_anova_pval_m_protlinc, fdr.level=.4)
+head(qvals_gene_anova_m_protlinc$qvalues)
+sum(qvals_gene_anova_m_protlinc$significant, na.rm = T) #202 v 183
+sum(qvals_gene_anova_m_protlinc$qvalues < .1,  na.rm = T) # 3
+sum(qvals_gene_anova_m_protlinc$qvalues < .05,  na.rm = T) # 0
+pdf(file = "Histogram_maternal_qvals_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+qplot(qvals_gene_anova_m_protlinc$qvalues, main="gene-eQTL maternal q-value distribution TMM", xlab="q-value") +
+geom_vline(xintercept = .4, color="red", linetype="dashed")
+dev.off()
+length(gene_anova_pval_p_protlinc) # 14964
+sum(is.na(gene_anova_pval_p_protlinc)) # 0
+names(gene_anova_pval_p_protlinc)<-Gene_names_protlinc
+sum(gene_anova_pval_p_protlinc==0) # NA
+pdf(file = "Histogram_paternal_pvals_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+qplot(gene_anova_pval_p_protlinc, main="gene-eQTL paternal p-value distribution", xlab="p-value") 
+dev.off()
+summary(gene_anova_pval_p_protlinc)
+qvals_gene_anova_p_protlinc <- qvalue(gene_anova_pval_p_protlinc, fdr.level=.4)
+sum(qvals_gene_anova_p_protlinc$significant, na.rm = T) # 153
+sum(qvals_gene_anova_p_protlinc$qvalues < .1,  na.rm = T) # 1
+sum(qvals_gene_anova_p_protlinc$qvalues < .05,  na.rm = T) # 1
+pdf(file = "Histogram_paternal_qvals_protlinc_kids2.pdf", width = 6, height = 4, family="ArialMT")
+qplot(qvals_gene_anova_p_protlinc$qvalues, main="gene-eQTL paternal q-value distribution TMM", xlab="q-value") +
+  geom_vline(xintercept = .4, color="red", linetype="dashed")
+dev.off()
+grep("ENSG00000134184", genes_norm_filt_noSex_protlinc_childfilt$ens_gene)
+qvals_gene_anova_p_protlinc$qvalues[grep("ENSG00000134184", names(gene_anova_pval_p_protlinc))]
+qvals_gene_anova_m_protlinc$qvalues[grep("ENSG00000134184", names(gene_anova_pval_p_protlinc))]
+qvals_gene_anova_p_protlinc$qvalues[grep("ENSG00000136111", names(gene_anova_pval_p_protlinc))]
+qvals_gene_anova_m_protlinc$qvalues[grep("ENSG00000136111", names(gene_anova_pval_p_protlinc))]
+
+qvals_gene_anova_p_protlinc$qvalues[grep("ENSG00000134184", names(gene_anova_pval_p_protlinc))]
+qvals_gene_anova_m_protlinc$qvalues[grep("ENSG00000134184", names(gene_anova_pval_m_protlinc))]
+
+idx_sig_m_protlinc <- which(qvals_gene_anova_m_protlinc$significant)
+idx_sig_p_protlinc <- which(qvals_gene_anova_p_protlinc$significant)
+cat_p_m_protlinc <- c(idx_sig_m_protlinc, idx_sig_p_protlinc)
+sum(duplicated(cat_p_m_protlinc)) #19
+cat_p_m_protlinc <- cat_p_m_protlinc[!duplicated(cat_p_m_protlinc)]
+length(cat_p_m_protlinc) # 336 367
+
+# get the index for the significant peaks
+sig_genes_protlinc <- Gene_names_protlinc[cat_p_m_protlinc]
+length(sig_genes_protlinc) #367
+head(sig_genes_protlinc)
+
+# plot the signficant peaks - .5
+plot_count_haplo_list_protlinc <- list()
+f<-1
+for (i in cat_p_m_protlinc){
+  y <- t(counts_protlinc[i,])
+  m <- t(Gene_mat_protlinc[i,])
+  p <- t(Gene_pat_protlinc[i,])
+  temp_df <- cbind(y,m,p, 0,Sex_child_factor)
+  colnames(temp_df) <- c("y","m","p","g","sex")
+  temp_df <- as.data.frame(temp_df)
+  for (j in 1:nrow(temp_df)) {
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 0){temp_df$g[j] <- "0/0"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 0){temp_df$g[j] <- "1/0"}
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 1){temp_df$g[j] <- "0/1"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 1){temp_df$g[j] <- "1/1"}
+  }
+  temp_plot <- ggplot(temp_df, aes(factor(g), y))
+  temp_plot <- temp_plot + geom_boxplot() + 
+    geom_jitter(aes(colour=factor(sex,labels=c("Female","Male")))) +
+    scale_color_discrete(name = "Gender") +
+    ggtitle(Genes_haplo_protlinc$V4[i]) +
+    ylab("Gene Counts") + xlab("Haplotype")
+  plot_count_haplo_list_protlinc[[f]] <- temp_plot
+  f <- f+1
+}
+length(plot_count_haplo_list_protlinc) # 336 367
+random_samp <- sample(seq(1,20), 6)
+multiplot(plotlist = plot_count_haplo_list_protlinc[random_samp], cols = 2)
+seq(6,336,6)
+pdf(file = "expression_genotype_QTL_.4_2.pdf", family="ArialMT")
+j<-1
+for (i in seq(6,336,6)){
+  multiplot(plotlist = plot_count_haplo_list_protlinc[j:i], cols = 2)
+  j <- i+1
+}
+dev.off()
+
+# save the plots 
+saveRDS(plot_count_haplo_list_protlinc, "eQTL_plot_count_haplo_list_protlinc2.rds")
+
+# generate bed files and summary tables of the eQTLs
+# make an eQTL dataframe 
+sig_qvals_protlinc <- data.frame(Genes=Gene_names_protlinc[cat_p_m_protlinc],
+                        qval_m=qvals_gene_anova_m_protlinc$qvalues[cat_p_m_protlinc],
+                        qval_p=qvals_gene_anova_p_protlinc$qvalues[cat_p_m_protlinc])
+head(sig_qvals_protlinc)
+
+# match the genes with gene symbols
+t2g_genes <- t2g_mine[!duplicated(t2g_mine$ens_gene),2:3]
+dim(t2g_genes) # 60825
+sig_qvals_merge_protlinc <- merge(x=sig_qvals_protlinc, y=t2g_genes, by.x = "Genes", by.y = "ens_gene", all.x = T, sort=F)
+sum(duplicated(sig_qvals_merge_protlinc$Genes)) #1
+ # both haploytypes are significant
+Genes_haplo_protlinc[1462:1463,]
+head(sig_qvals_merge_protlinc)
+
+write.table(sig_qvals_merge_protlinc, file="sig_genes_protlinc2.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+# add on the haplo number to each gene
+Genes_haplo_protlinc_sig2 <- Genes_haplo_protlinc[cat_p_m_protlinc,]
+dim(Genes_haplo_protlinc_sig2)
+head(Genes_haplo_protlinc_sig2)
+Genes_haplo_protlinc_sig2 <- cbind(Genes_haplo_protlinc_sig2,sig_qvals_merge_protlinc)
+sum(Genes_haplo_protlinc_sig2$V4 ==Genes_haplo_protlinc_sig2$Genes) #367
+saveRDS(Genes_haplo_protlinc_sig2, "Genes_haplo_protlinc_sig2.rds")
+write.table(Genes_haplo_protlinc_sig2, file="Genes_haplo_protlinc_sig2.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+# get the haplotype bed file that's associated with the gene
+head(Genes_haplo_protlinc_sig2)
+protlinc_sig_haplo_bed2 <- Genes_haplo_protlinc_sig2[,c(8:10,1,6,6)]
+head(protlinc_sig_haplo_bed2)
+write.table(protlinc_sig_haplo_bed2, file="eQTL_protlinc.4_haplo2.bed", quote = F, sep = "\t", 
+            row.names = F, col.names = F, append = F)
+
+# make eQTL value list
+gene_eQTL_value_list_protlinc <-list()
+f<-1
+for (i in cat_p_m_protlinc){
+  y <- t(counts_protlinc[i,])
+  m <- t(Gene_mat_protlinc[i,])
+  p <- t(Gene_pat_protlinc[i,])
+  temp_df <- cbind(y,m,p, 0,Sex_child_factor)
+  colnames(temp_df) <- c("y","m","p","g","sex")
+  temp_df <- as.data.frame(temp_df)
+  for (j in 1:nrow(temp_df)) {
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 0){temp_df$g[j] <- "0/0"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 0){temp_df$g[j] <- "1/0"}
+    if (temp_df$m[j] == 0 && temp_df$p[j] == 1){temp_df$g[j] <- "0/1"}
+    if (temp_df$m[j] == 1 && temp_df$p[j] == 1){temp_df$g[j] <- "1/1"}
+  }
+  temp_df <- temp_df[,c(1,4,5)]
+  gene_eQTL_value_list_protlinc[[f]] <- temp_df
+  names(gene_eQTL_value_list_protlinc)[f] <- as.character(Genes_haplo_protlinc$V4[i])
+  f<-f+1
+}
+length(gene_eQTL_value_list_protlinc)
+gene_eQTL_value_list_protlinc[[1]]
+saveRDS(gene_eQTL_value_list_protlinc,"gene_eQTL_value_list_protlinc2.rds")
+```
+
+
+
+```{r compare-to-li, echo=TRUE, warning=FALSE, message = FALSE}
+
+ # Mont data
+Li_et_al <- read.table("../../Montgomery_RNA/GSE56961_CEU.family1463.gene.cis-eQTL.txt", header=T)
+
+# Mont genes
+Li_et_al_noNA <-Li_et_al[Li_et_al$GENE_ID!="NaN",]
+dim(Li_et_al_noNA) # 8079
+Li_et_al_noNA_genes <- Li_et_al_noNA$GENE_ID
+
+Li_et_al_NA <-Li_et_al[Li_et_al$GENE_ID=="NaN",]
+dim(Li_et_al_NA) # 2116
+
+# li et al eQTLs
+Li_et_al_qvals <- qvalue(Li_et_al$cis.eQTL_PVAL, fdr.level = .5)
+Li_et_al_sig <- Li_et_al[Li_et_al_qvals$significant,]
+Li_et_al_sig_noNA <- Li_et_al_sig[Li_et_al_sig$GENE_ID!="NaN",]
+dim(Li_et_al_sig_noNA) # 193  11
+
+Li_et_al_sig_noNA_genes <- substr(Li_et_al_sig_noNA$GENE_ID, start=1, stop = 15)
+
+sum(Li_et_al_sig_noNA_genes %in% substr(sig_qvals_merge_protlinc$Genes, start=1,stop=15)) #22
+
+# eQTLs in both?
+idx_overlapLi_ID <- which(substr(sig_qvals_merge_protlinc$Genes, start=1,stop=15) %in% Li_et_al_sig_noNA_genes) 
+length(idx_overlapLi_ID) #22
+
+idx_overlapLi_ID_only <- which(substr(sig_qvals_merge_protlinc$Genes, start=1,stop=15) %in% Li_et_al_sig_noNA_genes) 
+length(idx_overlapLi_ID_only) #22
+# grabbing and writing out those with ID
+sig_qvals_merge_protlinc_overLi_IDonly <- sig_qvals_merge_protlinc[idx_overlapLi_ID_only,]
+dim(sig_qvals_merge_protlinc_overLi_IDonly)
+write.table(sig_qvals_merge_protlinc_overLi_IDonly, file="sig_qvals_merge_protlinc_overLi_IDonly.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+
+ # what about gene symbol rescue? 
+Li_et_al_sig_NA <-Li_et_al_sig[Li_et_al_sig$GENE_ID=="NaN",]
+dim(Li_et_al_sig_NA) # 69
+head(Li_et_al_sig_NA)
+
+idx_overlapLi_name <- grep(paste(sig_qvals_merge_protlinc$Gene_sym,collapse="|"), Li_et_al_sig_NA$otherNAME)
+Li_et_al_sig_NA$otherNAME[idx_overlapLi_name]
+Li_sigNA_names <- c("RP11-429G19.3","ZNF10", "ZNF268", "IL4I1","NUP62", "ACCS", "GALK2", "PILRA", "PILRB", "GSTM", "CTD-2140B24.4", "CC2D2B", "ENTPD1", "CTD-2140B24")
+grep(paste(Li_sigNA_names,collapse="|"), sig_qvals_merge_protlinc$Gene_sym, value=T) # 5 more 
+idx_overlapLi_ID <- c(idx_overlapLi_ID,grep(paste(Li_sigNA_names,collapse="|"), sig_qvals_merge_protlinc$Gene_sym, value=F))
+
+length(idx_overlapLi_ID) #27
+sig_qvals_merge_protlinc_overLi <- sig_qvals_merge_protlinc[idx_overlapLi_ID,]
+write.table(sig_qvals_merge_protlinc_overLi, file="sig_qvals_merge_protlinc_overLi.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+# eGENES validated with qPCR
+qPCR_val <- c("ALYREF_2", "SUPT6H", "ZNF331", "NPIP11", "TUBB6",
+              "CSTB_1", "HDHD3","CDKL1","EBPL","RAB31", "MCOLN2", "PEX6", "GSTM1")
+class(sig_qvals_merge_protlinc$Gene_sym)
+sum(qPCR_val %in% sig_qvals_merge_protlinc$Gene_sym) # 3
+
+sig_qvals_merge_protlinc[sig_qvals_merge_protlinc$Gene_sym %in% qPCR_val,]
+
+# ONLY including genes that are found in both
+
+#  Li et al with IDs
+Li_et_al_ensIDs <- c(substr(Li_et_al_noNA_genes,1,15)) 
+length(Li_et_al_ensIDs)
+head(Li_et_al_ensIDs)
+
+idx_tested_ens <- which(substr(Gene_names_protlinc, start=1,stop=15) %in% Li_et_al_ensIDs) 
+length(idx_tested_ens) # 6939
+
+Gene_names_protlinc_noID <- Gene_names_protlinc[idx_tested_ens]
+
+Gene_names_protlinc_noID_t2g <- merge(data.frame(Ens=Gene_names_protlinc_noID), 
+                                 y=t2g_mine, by.x="Ens", by.y="ens_gene", all.x=TRUE)
+dim(Gene_names_protlinc_noID_t2g)
+Gene_names_protlinc_noID_t2g <- Gene_names_protlinc_noID_t2g[!duplicated(Gene_names_protlinc_noID_t2g$Ens),]
+head(Gene_names_protlinc_noID_t2g$Gene_sym)
+str(Gene_names_protlinc_noID_t2g) # 6936
+
+#
+Li_et_al_NA_syms <-NULL
+i<-1
+for (i in 1:nrow(Li_et_al_NA)){
+  tmp_syms <- do.call(rbind, strsplit(Li_et_al_NA$otherNAME[i], ","))[1,]
+  Li_et_al_NA_syms <- c(Li_et_al_NA_syms, tmp_syms)
+}
+length(Li_et_al_NA_syms) #4834
+head(Li_et_al_NA_syms)
+head(Gene_names_protlinc_noID_t2g$Gene_sym)
+
+idx_NA_tested <- which(Gene_names_protlinc_noID_t2g$Gene_sym %in% Li_et_al_NA_syms)
+length(idx_NA_tested) #0 
+
+
+### OK only going to use those with IDs
+idx_tested_by_me <- which(substr(Li_et_al_sig_noNA$GENE_ID,1,15) %in% substr(Gene_names_protlinc, start=1,stop=15)) 
+length(idx_tested_by_me)
+
+Li_et_al_sig_noNA_testme <- substr(Li_et_al_sig_noNA$GENE_ID[idx_tested_by_me],1,15)
+length(Li_et_al_sig_noNA_testme)
+
+idx_tested_by_them <- which(substr(sig_qvals_merge_protlinc$Genes,1,15) %in% Li_et_al_ensIDs) 
+length(idx_tested_by_them)
+sig_qvals_merge_protlinc_testLi <- substr(sig_qvals_merge_protlinc$Genes[idx_tested_by_them],1,15)
+length(sig_qvals_merge_protlinc_testLi)
+
+# Theirs: 167 (145)
+# Mine: 183 (161)
+# Both:22
+
+go.obj <- newGeneOverlap(Li_et_al_sig_noNA_testme, 
+                         sig_qvals_merge_protlinc_testLi, genome.size=6939)
+
+go.obj <- testGeneOverlap(go.obj)
+print(go.obj)
+
+```
+
+
+```{r compare-to-li2, echo=TRUE, warning=FALSE, message = FALSE}
+
+ # Mont data
+Li_et_al <- read.table("../../Montgomery_RNA/GSE56961_CEU.family1463.gene.cis-eQTL.txt", header=T)
+
+# Mont genes
+Li_et_al_noNA <-Li_et_al[Li_et_al$GENE_ID!="NaN",]
+dim(Li_et_al_noNA) # 8079
+Li_et_al_noNA_genes <- Li_et_al_noNA$GENE_ID
+
+Li_et_al_NA <-Li_et_al[Li_et_al$GENE_ID=="NaN",]
+dim(Li_et_al_NA) # 2116
+
+# li et al eQTLs
+Li_et_al_qvals <- qvalue(Li_et_al$cis.eQTL_PVAL, fdr.level = .5)
+Li_et_al_sig <- Li_et_al[Li_et_al_qvals$significant,]
+Li_et_al_sig_noNA <- Li_et_al_sig[Li_et_al_sig$GENE_ID!="NaN",]
+dim(Li_et_al_sig_noNA) # 193  11
+
+Li_et_al_sig_noNA_genes <- substr(Li_et_al_sig_noNA$GENE_ID, start=1, stop = 15)
+
+sum(Li_et_al_sig_noNA_genes %in% substr(sig_qvals_merge_protlinc$Genes, start=1,stop=15)) #21
+
+# eQTLs in both?
+idx_overlapLi_ID <- which(substr(sig_qvals_merge_protlinc$Genes, start=1,stop=15) %in% Li_et_al_sig_noNA_genes) 
+length(idx_overlapLi_ID) #21
+
+idx_overlapLi_ID_only <- which(substr(sig_qvals_merge_protlinc$Genes, start=1,stop=15) %in% Li_et_al_sig_noNA_genes) 
+length(idx_overlapLi_ID_only) #22
+# grabbing and writing out those with ID
+sig_qvals_merge_protlinc_overLi_IDonly <- sig_qvals_merge_protlinc[idx_overlapLi_ID_only,]
+dim(sig_qvals_merge_protlinc_overLi_IDonly)
+write.table(sig_qvals_merge_protlinc_overLi_IDonly, file="sig_qvals_merge_protlinc_overLi_IDonly2.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+sig_qvals_merge_protlinc_overLi_IDonly_edit <- sig_qvals_merge_protlinc_overLi_IDonly
+sig_qvals_merge_protlinc_overLi_IDonly_edit$Genes <- substr(sig_qvals_merge_protlinc_overLi_IDonly_edit$Genes, start=1,stop=15)
+head(Li_et_al_sig_noNA)
+Li_et_al_sig_noNA_edit <- Li_et_al_sig_noNA
+Li_et_al_sig_noNA_edit$GENE_ID <- substr(Li_et_al_sig_noNA_edit$GENE_ID, start=1,stop=15)
+
+sig_qvals_merge_protlinc_overLi_IDonly_merge <- merge(x=sig_qvals_merge_protlinc_overLi_IDonly_edit,Li_et_al_sig_noNA_edit, by.x="Genes", by.y="GENE_ID")
+dim(sig_qvals_merge_protlinc_overLi_IDonly_merge)
+head(sig_qvals_merge_protlinc_overLi_IDonly_merge)
+
+head(Li_et_al_sig_noNA_genes)
+ # what about gene symbol rescue? 
+Li_et_al_sig_NA <-Li_et_al_sig[Li_et_al_sig$GENE_ID=="NaN",]
+dim(Li_et_al_sig_NA) # 69
+head(Li_et_al_sig_NA)
+
+idx_overlapLi_name <- grep(paste(sig_qvals_merge_protlinc$Gene_sym,collapse="|"), Li_et_al_sig_NA$otherNAME)
+Li_et_al_sig_NA$otherNAME[idx_overlapLi_name]
+Li_sigNA_names <- c("RP11-429G19.3","ZNF10", "ZNF268", "IL4I1","NUP62", "ACCS", "GALK2", "PILRA", "PILRB", "GSTM", "CTD-2140B24.4", "CC2D2B", "ENTPD1", "CTD-2140B24","CTD-2609K8.3")
+grep(paste(Li_sigNA_names,collapse="|"), sig_qvals_merge_protlinc$Gene_sym, value=T) # 6 more 
+idx_overlapLi_ID <- c(idx_overlapLi_ID,grep(paste(Li_sigNA_names,collapse="|"), sig_qvals_merge_protlinc$Gene_sym, value=F))
+
+length(idx_overlapLi_ID) #27
+sig_qvals_merge_protlinc_overLi <- sig_qvals_merge_protlinc[idx_overlapLi_ID,]
+write.table(sig_qvals_merge_protlinc_overLi, file="sig_qvals_merge_protlinc_overLi2.txt", quote = F, sep = "\t", 
+            row.names = F, col.names = T, append = F)
+
+# eGENES validated with qPCR
+qPCR_val <- c("ALYREF_2", "SUPT6H", "ZNF331", "NPIP11", "TUBB6",
+              "CSTB_1", "HDHD3","CDKL1","EBPL","RAB31", "MCOLN2", "PEX6", "GSTM1")
+class(sig_qvals_merge_protlinc$Gene_sym)
+sum(qPCR_val %in% sig_qvals_merge_protlinc$Gene_sym) # 4
+
+sig_qvals_merge_protlinc[sig_qvals_merge_protlinc$Gene_sym %in% qPCR_val,]
+
+# ONLY including genes that are found in both
+
+#  Li et al with IDs
+Li_et_al_ensIDs <- c(substr(Li_et_al_noNA_genes,1,15)) 
+length(Li_et_al_ensIDs)
+head(Li_et_al_ensIDs)
+
+idx_tested_ens <- which(substr(Gene_names_protlinc, start=1,stop=15) %in% Li_et_al_ensIDs) 
+length(idx_tested_ens) # 6967
+
+Gene_names_protlinc_noID <- Gene_names_protlinc[idx_tested_ens]
+
+Gene_names_protlinc_noID_t2g <- merge(data.frame(Ens=Gene_names_protlinc_noID), 
+                                 y=t2g_mine, by.x="Ens", by.y="ens_gene", all.x=TRUE)
+dim(Gene_names_protlinc_noID_t2g)
+Gene_names_protlinc_noID_t2g <- Gene_names_protlinc_noID_t2g[!duplicated(Gene_names_protlinc_noID_t2g$Ens),]
+head(Gene_names_protlinc_noID_t2g$Gene_sym)
+str(Gene_names_protlinc_noID_t2g) # 6936
+
+#
+Li_et_al_NA_syms <-NULL
+i<-1
+for (i in 1:nrow(Li_et_al_NA)){
+  tmp_syms <- do.call(rbind, strsplit(Li_et_al_NA$otherNAME[i], ","))[1,]
+  Li_et_al_NA_syms <- c(Li_et_al_NA_syms, tmp_syms)
+}
+length(Li_et_al_NA_syms) #4834
+head(Li_et_al_NA_syms)
+head(Gene_names_protlinc_noID_t2g$Gene_sym)
+
+idx_NA_tested <- which(Gene_names_protlinc_noID_t2g$Gene_sym %in% Li_et_al_NA_syms)
+length(idx_NA_tested) #0 
+
+
+### OK only going to use those with IDs
+idx_tested_by_me <- which(substr(Li_et_al_sig_noNA$GENE_ID,1,15) %in% substr(Gene_names_protlinc, start=1,stop=15)) 
+length(idx_tested_by_me)
+
+Li_et_al_sig_noNA_testme <- substr(Li_et_al_sig_noNA$GENE_ID[idx_tested_by_me],1,15)
+length(Li_et_al_sig_noNA_testme)
+
+idx_tested_by_them <- which(substr(sig_qvals_merge_protlinc$Genes,1,15) %in% Li_et_al_ensIDs) 
+length(idx_tested_by_them)
+sig_qvals_merge_protlinc_testLi <- substr(sig_qvals_merge_protlinc$Genes[idx_tested_by_them],1,15)
+length(sig_qvals_merge_protlinc_testLi)
+
+# Theirs: 167 (146)
+# Mine: 159 (138)
+# Both:22
+
+go.obj <- newGeneOverlap(Li_et_al_sig_noNA_testme, 
+                         sig_qvals_merge_protlinc_testLi, genome.size=6967)
+
+go.obj <- testGeneOverlap(go.obj)
+print(go.obj)
+
+```
+
+
+I calculated the EBV CN by finding the relative proportion of EBV represented in the XWGBS libraries compared to the autosomes (unsure if this biases lower CN in males because they lack a second full X to "sink" reads). 
+```{r CN-RNACN, echo=TRUE, warning=FALSE, message = FALSE}
+EBV_CN <- read.table("../../BS-seq/EBV_Bams/Estimated_EBV_CN.txt")
+head(EBV_CN)
+EBV_covariate_value
+Mandage_et_al <- read.table("family_EBV_est.txt", header=T)
+cor(Mandage_et_al$EBV.load, EBV_CN[13:14])
+df_EBVCN <- data.frame(RNAseqCN=EBV_covariate_value, XWGBSCN=unlist(EBV_CN[1,]))
+cor(df_EBVCN) # 0.6123885 so moderate correlation
+cor(df_EBVCN, method="spearman") # 0.7303922 so moderate correlation - rank makes more sense
+```
+
+Finding if any eQTL genes' expression levels are correlated with miRNAs found in Cis
+```{r regress-eGene-emiRNA, echo=TRUE, warning=FALSE, message = FALSE}
+miRNA_eQTL_table_name<-readRDS("../../../../greally-lab/Elangeni_Andrew/miRNA_eQTL_table_name.rds")
+head(miRNA_eQTL_table_name) #36
+dim(miRNA_eQTL_table_name) # 36
+
+# get gene expression values
+colnames(Genes_haplo_protlinc_sig)
+genes_for_regress <- Genes_haplo_protlinc_sig[,-c(12:13,24:27)]
+genes_for_regress$Genes <- substr(genes_for_regress$Genes, start = 0, stop = 15)
+head(genes_for_regress)
+
+sum(miRNA_eQTL_table_name$Haplotype %in% genes_for_regress$V10) #21
+sum(genes_for_regress$V10 %in% miRNA_eQTL_table_name$Haplotype) #49
+
+merge_EmiRNA_eGene <- merge(miRNA_eQTL_table_name, genes_for_regress, 
+                            by.x="Haplotype", by.y="V10")
+head(merge_EmiRNA_eGene)
+dim(merge_EmiRNA_eGene) # [1] 50 76
+colnames(merge_EmiRNA_eGene)
+anova_pval_val_regress<-c()
+j<-1
+for (j in 1:nrow(merge_EmiRNA_eGene)){
+  temp_gene <-t(merge_EmiRNA_eGene[j,37:47])
+  temp_miRNA <-t(merge_EmiRNA_eGene[j,c(10:19,24)])
+  temp_df <- cbind(temp_gene,temp_miRNA)
+  colnames(temp_df) <- c("gene","mirna")
+  full_model <- lm(formula = gene ~ mirna + metadata_kids$extract + EBV_covariate_value[-c(1,2,13:16)], data=as.data.frame(temp_df))
+  anova_pval_val_regress[j] <- anova(full_model)$Pr[1] 
+}
+length(anova_pval_val_regress) #50 
+sum(is.na(anova_pval_val_regress)) # 0
+names(anova_pval_val_regress)<-merge_EmiRNA_eGene$Genes
+sum(anova_pval_val_regress==0) # 0
+pdf(file = "Histogram_EmiRNA_eGene_regress_pval.pdf", width = 6, height = 4, family="ArialMT")
+qplot(anova_pval_val_regress, main="EmiRNA eGene p-value distribution", xlab="p-value")
+dev.off()
+summary(anova_pval_val_regress)
+qvals_anova_pval_val_regress <- qvalue(anova_pval_val_regress, fdr.level=.05)
+sum(qvals_anova_pval_val_regress$significant, na.rm = T) #27
+pdf(file = "Histogram_EmiRNA_eGene_regress_qval.pdf", width = 6, height = 4, family="ArialMT")
+qplot(qvals_anova_pval_val_regress$qvalues, main="EmiRNA eGene q-value distribution TMM", xlab="q-value") +
+geom_vline(xintercept = .05, color="red", linetype="dashed")
+dev.off()
+
+merge_EmiRNA_eGene$regress_q <- qvals_anova_pval_val_regress$qvalues
+
+merge_EmiRNA_eGene$Gene_sym[merge_EmiRNA_eGene$regress_q<0.05]
+
+ # For significant associations, are any of them validated or predicted targets?
+miRNA_regress_sig <- merge_EmiRNA_eGene$V2[merge_EmiRNA_eGene$regress_q<0.05]
+head(miRNA_regress_sig)
+i<-1
+miRNA_regress_gene_list<-list()
+for (i in 1:length(miRNA_regress_sig)){
+  example1 <- get_multimir(mirna = miRNA_regress_sig[i], summary = TRUE, org = "hsa", 
+                         table = "all")
+  l_temp <- list()
+  ensID_validated <- data.frame(Gene_name=example1@summary$target_ensembl[which(example1@summary$validated.sum>0)])
+  ensID_validated$Gene_name
+  idx_val <- which(ensID_validated$Gene_name %in% merge_EmiRNA_eGene$Genes[merge_EmiRNA_eGene$regress_q<0.05])
+  l_temp[[1]] <- ensID_validated$Gene_name[idx_val]
+
+  ensID_predicted <- data.frame(Gene_name=example1@summary$target_ensembl[which(example1@summary$predicted.sum>0)])
+  idx_pred <- which(ensID_predicted$Gene_name %in% merge_EmiRNA_eGene$Genes[merge_EmiRNA_eGene$regress_q<0.05]) 
+  l_temp[[2]] <- ensID_predicted$Gene_name[idx_pred]
+  names(l_temp) <- c("Validated_targ", "Predicted_targ")
+  miRNA_regress_gene_list[[i]] <- l_temp
+  names(miRNA_regress_gene_list)[i]<- miRNA_regress_sig[i]
+}
+length(miRNA_regress_gene_list)
+miRNA_regress_gene_list[[27]]
+miRNA_regress_sig_gene <- merge_EmiRNA_eGene[merge_EmiRNA_eGene$regress_q<0.05, c(26,73)]
+
+pred_genes <- data.frame(miRNA=as.character(), predicted=as.character() )
+for(i in 1:length(miRNA_regress_gene_list)){
+  temp <- miRNA_regress_gene_list[[i]][[2]]
+  if (length(temp)>0) {
+    temp_df <- data.frame(miRNA=names(miRNA_regress_gene_list)[i], predicted=temp)
+    pred_genes <- rbind(pred_genes,temp_df)
+  }
+}
+dim(pred_genes) # 45  2
+
+pred_genes_miRNA_gene <- merge(pred_genes, miRNA_regress_sig_gene, by.x="miRNA", by.y="V2")
+dim(pred_genes_miRNA_gene) # 97  3
+head(pred_genes_miRNA_gene,12)
+
+sum(pred_genes_miRNA_gene$predicted == pred_genes_miRNA_gene$Genes) #0
+# none of the genes whose expression is 
+sum(pred_genes_miRNA_gene$predicted%in%pred_genes_miRNA_gene$Genes) #69
+
+
+# gene's expression with miRNA expression AND a validated target of the miRNA
+# 1-3: ENSG00000107263 (hsa-miR-5193)
+# 8: ENSG00000090857 + ENSG00000107263 (hsa-miR-1255a)
+# 11: ENSG00000154305 (hsa-miR-32-5p)
+# 17:ENSG00000160058 (hsa-miR-3173-3)
+i<-1
+val_genes<-c()
+for(i in 1:length(miRNA_regress_gene_list)){
+  val_genes <- c(val_genes,miRNA_regress_gene_list[[i]][[1]])
+}
+length(val_genes)
+
+sum(duplicated(merge_EmiRNA_eGene$Genes))
+merge_EmiRNA_eGene$Genes[duplicated(merge_EmiRNA_eGene$Genes)]
+
+eGenes_exp_emiRNA <- merge_EmiRNA_eGene[merge_EmiRNA_eGene$Genes %in% val_genes,]
+
+merge_EmiRNA_eGene$V2
+eGenes_exp_emiRNA$V2
+
+merge_EmiRNA_eGene[merge_EmiRNA_eGene$V2=="hsa-miR-5193",]
+merge_EmiRNA_eGene$V2
+# 1 ENSG00000160058 - hsa-miR-3173-3p 32
+# 2 ENSG00000107263 - hsa-miR-5193 1
+# 3 ENSG00000090857 - hsa-miR-1255a 11
+# 4 ENSG00000154305 - hsa-miR-32-5p 21
+for (i in 1:nrow(eGenes_exp_emiRNA)){
+  temp_gene <-t(eGenes_exp_emiRNA[4,37:47])
+  temp_miRNA <-t(merge_EmiRNA_eGene[21,c(10:19,24)])
+  temp_df <- data.frame(gene=temp_gene,mirna=temp_miRNA)
+  colnames(temp_df) <- c("gene","mirna")
+  ggplot(data = temp_df, aes(x = mirna, y = gene)) +
+  stat_smooth_func(geom="text",method="lm",hjust=0,vjust=0, parse=TRUE,colour="red") +
+  geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+  geom_point() +
+    xlab("Normalized miRNA expression") +
+    ylab("Normalized gene expression") 
+  
+    ggtitle(paste(eGenes_exp_emiRNA$Genes," aka ", eGenes_exp_emiRNA$Gene_sym, " ~ ", 
+               eGenes_exp_emiRNA$EnsID, " aka ",eGenes_exp_emiRNA$V2, sep=""))
+ p
+  l_plots_regress[[i]] <- p
+}
+
+
+
+
+# make plots
+library(devtools)
+devtools::source_gist("524eade46135f6348140", filename = "ggplot_smooth_func.R")
+
+
+
+l_plots_regress<-list()
+for (i in 1:nrow(eGenes_exp_emiRNA)){
+  temp_gene <-t(eGenes_exp_emiRNA[i,37:47])
+  temp_miRNA <-t(eGenes_exp_emiRNA[i,c(10:19,24)])
+  temp_df <- data.frame(gene=temp_gene,mirna=temp_miRNA)
+  colnames(temp_df) <- c("gene","mirna")
+  p <- ggplot(data = temp_df, aes(x = mirna, y = gene)) +
+  stat_smooth_func(geom="text",method="lm",hjust=0,vjust=0, parse=TRUE,colour="red") +
+  geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+  geom_point() +
+    xlab("Normalized miRNA expression") +
+    ylab("Normalized gene expression") +
+    ggtitle(paste(eGenes_exp_emiRNA$Genes," aka ", eGenes_exp_emiRNA$Gene_sym, " ~ ", 
+               eGenes_exp_emiRNA$EnsID, " aka ",eGenes_exp_emiRNA$V2, sep=""))
+ l_plots_regress[[i]] <- p
+}
+
+pdf(file = "eGenes_sig_regress_validated_miRNA.pdf", width=6,
+    height=4, family="ArialMT")
+for(i in 1:length(l_plots_regress)){
+  print(l_plots_regress[[i]])
+}
+dev.off()
+
+for (i in 1:nrow(eGenes_exp_emiRNA)){
+  temp_gene <-t(eGenes_exp_emiRNA[i,37:47])
+  temp_miRNA <-t(eGenes_exp_emiRNA[i,c(10:19,24)])
+  temp_df <- data.frame(gene=temp_gene,mirna=temp_miRNA)
+  colnames(temp_df) <- c("gene","mirna")
+  p <- ggplot(data = temp_df, aes(x = mirna, y = gene)) +
+  stat_smooth_func(geom="text",method="lm",hjust=0,vjust=0, parse=TRUE,colour="red") +
+  geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+  geom_point() +
+    xlab("Normalized miRNA expression") +
+    ylab("Normalized gene expression") +
+    ggtitle(paste(eGenes_exp_emiRNA$Genes," aka ", eGenes_exp_emiRNA$Gene_sym, " ~ ", 
+               eGenes_exp_emiRNA$EnsID, " aka ",eGenes_exp_emiRNA$V2, sep=""))
+ l_plots_regress[[i]] <- p
+}
+
+
+  
+  
+  p1 <- p + geom_text(aes(x=xpos, y=ypos, hjust=hjustvar, vjust=vjustvar), label = lm_eqn(lm(gene ~ mirna, temp_df)),colour="red", size = 5, parse = TRUE)
+  
+  stat_smooth_func(geom="text",method="lm",hjust=0,parse=TRUE) +
+  geom_smooth(method="lm",se=FALSE) +
+  geom_point() +
+  p1
+}
+  
+df_ZNF331 <- data.frame(miRNA=t(ZNF331_miRNA), gene=t(ZNF331_gene))
+colnames(df_ZNF331) <- c("miRNA", "gene")
+p <- ggplot(data = df_ZNF331, aes(x = miRNA, y = gene)) +
+  geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+  geom_point()
+
+p1 <- p + geom_text(aes(x=xpos, y=ypos, hjust=hjustvar, vjust=vjustvar), label = lm_eqn(lm(miRNA ~ gene, df_ZNF331)), 
+                    colour="red", size = 5, parse = TRUE)
+
+
+miRNA_gene_target_list_children <- readRDS("../../../../greally-lab/Elangeni_Andrew/miRNA_gene_target_list_children.rds")
+length(miRNA_gene_target_list_children)
+miRNA_gene_target_list_children[[2]]
+
+
+
+miRNA_gene_target_list_children <- list()
+i<-1
+
+head(example1$summary)
+
+for (i in 1:nrow(miRNA_eQTL_table_name_noNA)){
+  example1 <- get.multimir(mirna = miRNA_eQTL_table_name_noNA$miRNA_name[i], summary = TRUE, org = "hsa", 
+                         table = "all")
+  y <- t(miRNA_eQTL_table_name_noNA[i,c(10:19,24)])
+  l_temp <- list()
+  # regression for validated miRNAs
+  ensID_validated <- data.frame(Gene_name=example1$summary$target_ensembl[which(example1$summary$validated.sum>0)])
+  ensID_validated_exprs <- merge(ensID_validated, Genes_vals_TMM_child, by="Gene_name")
+  anova_pval_val <- rep(1,nrow(ensID_validated_exprs))
+  j<-1
+  for (j in 1:length(anova_pval_val)){
+  gene <- t(ensID_validated_exprs[j,-1])
+  temp_df <- cbind(y,gene)
+  colnames(temp_df) <- c("y","gene")
+  full_model <- lm(formula = y ~ gene, data=as.data.frame(temp_df))
+  anova_pval_val[j] <- anova(full_model)$Pr[1] 
+  }
+  names(anova_pval_val)<-ensID_validated_exprs$Gene_name
+  pdf(file = paste(miRNA_eQTL_table_name_noNA$miRNA_name[i],"_gene_target_plots", ".pdf",sep = ""), width=6,
+      height=4, family="ArialMT")
+  qplot(anova_pval_val, main="miRNA~genes p-value distribution", xlab="p-value") 
+  library(qvalue)
+  qval_anova_pval_val <- qvalue(anova_pval_val, fdr.level=.05)
+  sum(qval_anova_pval_val$significant, na.rm = T)
+  qplot(qval_anova_pval_val$qvalues, main="miRNA~genes q-value distribution", xlab="q-value") +
+    geom_vline(xintercept = .05, colour="red", linetype = "longdash")
+  sig_miRNA_genes_val_names <- names(qval_anova_pval_val$qvalues)[qval_anova_pval_val$significant]
+  l_temp[[1]] <- sig_miRNA_genes_val_names
+  # now for predicted
+  ensID_predicted <- data.frame(Gene_name=example1$summary$target_ensembl[which(example1$summary$predicted.sum>0)])
+  ensID_predicted_exprs <- merge(ensID_predicted, Genes_vals_TMM_child, by="Gene_name")
+  anova_pval_pred <- rep(1,nrow(ensID_predicted_exprs))
+  for (j in 1:length(anova_pval_pred)){
+    gene <- t(ensID_predicted_exprs[j,-1])
+    temp_df <- cbind(y,gene)
+    colnames(temp_df) <- c("y","gene")
+    full_model <- lm(formula = y ~ gene, data=as.data.frame(temp_df))
+    anova_pval_pred[j] <- anova(full_model)$Pr[1] 
+  }
+  names(anova_pval_pred)<-ensID_predicted_exprs$Gene_name
+  qplot(anova_pval_pred, main="miRNA~genes p-value distribution", xlab="p-value") 
+  library(qvalue)
+  qval_anova_pval_pred <- qvalue(anova_pval_pred, fdr.level=.05)
+  sum(qval_anova_pval_pred$significant, na.rm = T)
+  qplot(qval_anova_pval_pred$qvalues, main="miRNA~genes q-value distribution", xlab="q-value") +
+    geom_vline(xintercept = .05, colour="red", linetype = "longdash")
+  dev.off()
+  sig_miRNA_genes_pred_names <- names(qval_anova_pval_pred$qvalues)[qval_anova_pval_pred$significant]
+  l_temp[[2]] <- sig_miRNA_genes_pred_names
+  names(l_temp) <- c("Validated_targ", "Predicted_targ")
+  miRNA_gene_target_list_children[[i]] <- l_temp
+  names(miRNA_gene_target_list_children)[i]<- miRNA_eQTL_table_name_noNA$miRNA_name[i]
+}
+saveRDS(miRNA_gene_target_list_children, "miRNA_gene_target_list_children.rds")
+
+# filter significant targets for the eQTL genes
+gene_eQTL_table <- readRDS("gene_eQTL_table.rds")
+head(gene_eQTL_table)
+dim(gene_eQTL_table)
+
+for(i in 1:length(miRNA_gene_target_list_children)){
+  idx_val <- which(miRNA_gene_target_list_children[[i]]$Validated_targ %in% substr(gene_eQTL_table$EnsID, 0, 15))
+  idx_pred <- which(miRNA_gene_target_list_children[[i]]$Predicted_targ %in% substr(gene_eQTL_table$EnsID, 0, 15))
+  if(length(idx_pred)>0 | length(idx_val)>0){
+    val_genes <- paste0(names(miRNA_gene_target_list_children)[i], "-", miRNA_gene_target_list_children[[i]]$Validated_targ[idx_val])  
+    pred_genes <- paste0(names(miRNA_gene_target_list_children)[i], "-", miRNA_gene_target_list_children[[i]]$Validated_targ[idx_pred])  
+    print(paste("validated:",val_genes,"predicted:",pred_genes))
+  }
+}
+
+head(Genes_vals_TMM)
+head(gene_eQTL_table)
+colnames(gene_eQTL_table)
+gene_eQTL_table_trimcols <- gene_eQTL_table[,c(8:24,4)]
+gene_eQTL_table_trimcols$EnsID <- substr(gene_eQTL_table_trimcols$EnsID, 0, 15)
+colnames(gene_eQTL_table_trimcols)[18] <- "Gene_name"
+gene_eQTL_table_trimcols_child <- gene_eQTL_table_trimcols[,c(3:12,17:18)]
+head(gene_eQTL_table_trimcols_child)
+dim(gene_eQTL_table_trimcols_child)
+
+miRNA_gene_target_list_QTL_children <- list()
+i<-2
+colnames(miRNA_eQTL_table_name_noNA)
+head(miRNA_eQTL_table_name_noNA)
+for (i in 1:nrow(miRNA_eQTL_table_name_noNA)){
+  example1 <- get.multimir(mirna = miRNA_eQTL_table_name_noNA$miRNA_name[i], summary = TRUE, org = "hsa", 
+                           table = "all")
+  y <- t(miRNA_eQTL_table_name_noNA[i,c(10:19,24)])
+  l_temp <- list()
+  # regression for validated miRNAs
+  ensID_validated <- data.frame(Gene_name=example1$summary$target_ensembl[which(example1$summary$validated.sum>0)])
+  ensID_validated_exprs <- merge(ensID_validated, gene_eQTL_table_trimcols_child, by="Gene_name")
+  anova_pval_val <- rep(1,nrow(ensID_validated_exprs))
+  if (nrow(ensID_validated_exprs)>0) {
+    j<-1
+    for (j in 1:length(anova_pval_val)){
+      gene <- t(ensID_validated_exprs[j,-1])
+      temp_df <- cbind(y,gene)
+      colnames(temp_df) <- c("y","gene")
+      full_model <- lm(formula = y ~ gene, data=as.data.frame(temp_df))
+      anova_pval_val[j] <- anova(full_model)$Pr[1] 
+    }
+    names(anova_pval_val)<-ensID_validated_exprs$Gene_name
+  }
+  l_temp[[1]] <- anova_pval_val
+ 
+   # now for predicted
+  ensID_predicted <- data.frame(Gene_name=example1$summary$target_ensembl[which(example1$summary$predicted.sum>0)])
+  ensID_predicted_exprs <- merge(ensID_predicted, gene_eQTL_table_trimcols_child, by="Gene_name")
+  anova_pval_pred <- rep(1,nrow(ensID_predicted_exprs))
+  if (length(anova_pval_pred)>0) {
+    for (j in 1:length(anova_pval_pred)){
+      gene <- t(ensID_predicted_exprs[j,-1])
+      temp_df <- cbind(y,gene)
+      colnames(temp_df) <- c("y","gene")
+      full_model <- lm(formula = y ~ gene, data=as.data.frame(temp_df))
+      anova_pval_pred[j] <- anova(full_model)$Pr[1] 
+    }
+    names(anova_pval_pred)<-ensID_predicted_exprs$Gene_name  
+  }
+  l_temp[[2]] <- anova_pval_pred
+  names(l_temp) <- c("Validated_targ", "Predicted_targ")
+  miRNA_gene_target_list_QTL_children[[i]] <- l_temp
+  names(miRNA_gene_target_list_QTL_children)[i]<- miRNA_eQTL_table_name_noNA$miRNA_name[i]
+}
+saveRDS(miRNA_gene_target_list_QTL_children, "miRNA_gene_target_list_QTL_children.rds")
+str(miRNA_gene_target_list_QTL_children)
+miRNA_gene_target_list_QTL_children <- readRDS("miRNA_gene_target_list_QTL_children.rds")
+
+# ENSG00000130844 / hsa-miR-5094 / ZNF331 / 0.0506 / Predicted 
+# ENSG00000169213 / hsa-miR-3164 / RAB3B / 0.0244 / Predicted
+# http://www.genecards.org/cgi-bin/carddisp.pl?gene=RAB3B
+# to get expression values.
+gene_eQTL_table[grep("ENSG00000169213",gene_eQTL_table$EnsID),]
+# ENSG00000121446 / hsa-miR-1237-3p / RGSL1 / 0.0629 / Predicted 
+# http://www.genecards.org/cgi-bin/carddisp.pl?gene=RGSL1
+```
+
+```{r explore-datakids2-PCAplot, echo=TRUE, warning=FALSE, message = FALSE}
+mat_pca <- as.matrix(genes_norm_filt_noSex_protlinc_childfilt2[,-c(1:3,14:17)])
+head(mat_pca)
+
+Y <- apply(log(mat_pca+1), 1, function(y) scale(y, center=TRUE, scale=FALSE))
+s <- svd(Y)
+percent <- s$d^2/sum(s$d^2)*100
+labs <- sapply(seq_along(percent), function(i) {
+  paste("PC ", i, " (", round(percent[i], 2), "%)", sep="")
+})
+
+pdf(file = "PCA_genes_norm_filt_noSex_noEbv_protlinc_kids2_harvest.pdf", width = 6, height = 4, family="ArialMT")
+plot(s$u[,1], s$u[,3], type='n', xlab=labs[1], ylab=labs[3])
+text(s$u[,1], s$u[,3], labels=colnames(mat_pca), col=color_extract[facts_extract_kids])
+dev.off()
+
+# text(s$u[,1], s$u[,3], labels=colnames(mat_pca), col=color_extract[facts_EBV_kids])
+
+```
+
+
+```{r session-info, echo=TRUE, warning=FALSE, message = FALSE}
+sessionInfo()
+```

@@ -1,0 +1,121 @@
+
+ # download the tools
+curl -O https://raw.githubusercontent.com/CGATOxford/cgat/master/install-CGAT-tools.sh
+
+ # install the tools
+./install-CGAT-tools.sh --production 
+
+ #filter the gtf
+source /gs/gsfs0/users/anjohnst/cgat-install/conda-install/bin/activate cgat-s
+cgat gtf2gtf --method=filter --filter-method=longest-transcript -I gencode.vM15.primary_assembly.annotation.gtf > gencode.vM15.primary_assembly.annotation.filterLongestTrans.gtf 
+
+module load ucsc/080613 # aka kent tools
+gtfToGenePred gencode.vM15.primary_assembly.annotation.filterLongestTrans.gtf gencode.vM15.primary_assembly.annotation.filterLongestTrans.genePred
+genePredToBed gencode.vM15.primary_assembly.annotation.filterLongestTrans.genePred gencode.vM15.primary_assembly.annotation.filterLongestTrans.bed
+
+ # index the aligned files (required for some RSeQC scripts)
+for f1 in *Aligned.sortedByCoord.out.bam;
+do
+SAMPLE="$(echo ${f1} | cut -c 1-6)"
+echo $SAMPLE
+qsub -S /bin/bash -N index_${SAMPLE} -cwd -l h_vmem=30G -j y << EOF
+module load samtools/1.5/gcc.4.4.7
+samtools index $f1
+EOF
+done
+
+ # convert the bam files to bed 
+for f1 in *Aligned.sortedByCoord.out.bam;
+do
+SAMPLE="$(echo ${f1} | cut -c 1-6)"
+echo $SAMPLE
+qsub -S /bin/bash -N BamToBed_${SAMPLE} -cwd -l h_vmem=7G -j y << EOF
+module load bedtools2/2.26.0/gcc.4.4.7
+bedtools bamtobed -i $f1 > ${f1%.bam}.bed
+EOF
+done
+
+ # run the mRIN analysis
+for f1 in *Aligned.sortedByCoord.out.bed;
+do
+SAMPLE="$(echo ${f1} | cut -c 1-6)"
+echo $SAMPLE
+qsub -S /bin/bash -N tag2profile_${SAMPLE} -cwd -l h_vmem=7G -j y << EOF
+module load mRIN/012218
+module load R/3.4.0/gcc.4.7.4
+PERL5LIB=~/Programs/mrin-master/czplib-master
+perl $(which tag2profile.pl) -big -exact -of bedgraph -v $f1 mRIN/${SAMPLE}.bedGraph
+EOF
+done
+
+cd mRIN
+mkdir cdf #we will save them in a separate directory to be organized
+mkdir ks #we will save them in a separate directory to be organized
+
+for f1 in *.bedGraph;
+do
+SAMPLE="$(echo ${f1} | cut -c 1-6)"
+echo $SAMPLE
+qsub -S /bin/bash -N ks_${SAMPLE} -cwd -l h_vmem=7G -j y << EOF
+module load mRIN/012218
+module load R/3.4.0/gcc.4.7.4
+PERL5LIB=~/Programs/mrin-master/czplib-master
+perl $(which gen_transcript_cdf.pl) -v /home/greally-lab/indexes/mm10_gencode/gencode.vM15.primary_assembly.annotation.filterLongestTrans.bed ${SAMPLE}.bedGraph cdf/${SAMPLE}.cdf.bedGraph 
+perl $(which ks_test_uniform.pl) -v cdf/${SAMPLE}.cdf.bedGraph ks/${SAMPLE}.ks.txt
+EOF
+done
+
+ # making the .conf file
+vi all_samples.conf
+i
+ks/KidCtA.ks.txt	KidCt
+ks/KidKDA.ks.txt	KidKD
+ks/MprCt1.ks.txt	MprCt1
+ks/MprCt2.ks.txt	MprCt2
+ks/MprKD1.ks.txt	MprKD1
+ks/MprKD2.ks.txt	MprKD2
+
+ # generate the mRIN for genes and samples
+qsub -S /bin/bash -N ks_all -cwd -l h_vmem=7G -j y << EOF
+module load mRIN/012218
+module load R/3.4.0/gcc.4.7.4
+PERL5LIB=~/Programs/mrin-master/czplib-master
+perl $(which gen_ks_matrix.pl) -v -base ./ --min-avg-cov 10 -v all_samples.conf all_samples.KS.mat.txt
+Rscript ~/Programs/mrin-master/cal_mrin.R -k all_samples.KS.mat.txt -s 0.05 -e 0.5 -b a -m out.mRIN.txt -v 1 -G out.GIS.txt
+EOF
+
+ # Run RSEQC 
+mkdir QC
+for f1 in *Aligned.sortedByCoord.out.bam;
+do 
+SAMPLE="$(echo ${f1} | cut -c 1-6)"
+echo $SAMPLE
+echo $f1
+mkdir QC/${SAMPLE}
+qsub -S /bin/bash -N rseqc_${SAMPLE} -cwd -l h_vmem=15G -j y << EOF
+module load RSeQC/2.6.2/python.2.7.8
+./RSeQC_3.sh $f1 QC /home/greally-lab/indexes/mm10_gencode/gencode.vM15.primary_assembly.annotation.filterLongestTrans.bed ${SAMPLE}
+EOF
+done
+
+ # Run bits of RSeQC that don't play nice in script
+for f1 in *Aligned.sortedByCoord.out.bam;
+do 
+SAMPLE="$(echo ${f1} | cut -c 1-6)"
+echo $SAMPLE
+echo $f1
+qsub -S /bin/bash -N rseqc_rdist_long_${SAMPLE} -cwd -l h_vmem=30G -j y << EOF
+module load RSeQC/2.6.2/python.2.7.8 
+read_distribution.py --input-file $f1 --refgene /home/greally-lab/indexes/mm10_gencode/gencode.vM15.primary_assembly.annotation.filterLongestTrans.bed  > QC/${SAMPLE}.read_distribution_longest.txt
+EOF
+done
+
+qsub -S /bin/bash -N tin_all_2 -cwd -l h_vmem=1000G -q highmem.q -j y << EOF
+module load RSeQC/2.6.2/python.2.7.8
+tin.py -i KidCtAligned.sortedByCoord.out.bam,KidKDAligned.sortedByCoord.out.bam,MprCt1Aligned.sortedByCoord.out.bam,MprCt2Aligned.sortedByCoord.out.bam,MprKD1Aligned.sortedByCoord.out.bam,MprKD2Aligned.sortedByCoord.out.bam -c 10 -n 100 -r /home/greally-lab/indexes/mm10_gencode/gencode.vM15.primary_assembly.annotation.filterLongestTrans.bed > all_tin_2.txt
+EOF
+
+qsub -S /bin/bash -N Cov_all_2 -cwd -l h_vmem=30G -j y << EOF
+module load RSeQC/2.6.2/python.2.7.8
+geneBody_coverage.py --input KidCtAligned.sortedByCoord.out.bam,KidKDAligned.sortedByCoord.out.bam,MprCt1Aligned.sortedByCoord.out.bam,MprCt2Aligned.sortedByCoord.out.bam,MprKD1Aligned.sortedByCoord.out.bam,MprKD2Aligned.sortedByCoord.out.bam --refgene /home/greally-lab/indexes/mm10_gencode/gencode.vM15.primary_assembly.annotation.filterLongestTrans.bed --out-prefix QC/Cov_all_uniq
+EOF
